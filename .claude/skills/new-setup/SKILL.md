@@ -38,12 +38,14 @@ One permitted parallelism:
 
 ### 1. Node bootstrap
 
-If the probe reported `STATUS: unavailable` (Node isn't installed yet), install Node 22 **before** running `bash setup.sh` — otherwise the first bootstrap run is guaranteed to fail and you'll pay for it twice:
+Check probe results and skip if `HOST_DEPS=ok` — Node, pnpm, `node_modules`, and `better-sqlite3`'s native binding are already in place.
+
+If the probe reported `STATUS: unavailable` (Node isn't installed yet — probe itself couldn't run), install Node 22 **before** running `bash setup.sh`, otherwise the first bootstrap run is guaranteed to fail:
 
 - macOS: `brew install node@22`
 - Linux / WSL: `curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash - && sudo apt-get install -y nodejs`
 
-Then run `bash setup.sh`. If the probe reported any other status, run `bash setup.sh` directly — it's idempotent and verifies host deps + native modules.
+Then run `bash setup.sh`. If the probe succeeded but `HOST_DEPS=missing`, run `bash setup.sh` directly — Node is there, deps aren't.
 
 Parse the status block:
 

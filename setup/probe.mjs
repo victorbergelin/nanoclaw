@@ -268,6 +268,22 @@ function probeInferredDisplayName() {
   return 'User';
 }
 
+function probeHostDeps() {
+  const nodeModules = path.resolve(process.cwd(), 'node_modules');
+  if (!fs.existsSync(nodeModules)) return 'missing';
+  // better-sqlite3's compiled native binding is the canonical proof that
+  // `pnpm install` ran AND the native build step succeeded. Cheaper than
+  // actually loading the module, and unambiguous on success.
+  const nativeBinding = path.join(
+    nodeModules,
+    'better-sqlite3',
+    'build',
+    'Release',
+    'better_sqlite3.node',
+  );
+  return fs.existsSync(nativeBinding) ? 'ok' : 'missing';
+}
+
 function probeTimezone() {
   const envTz = readEnvVar('TZ');
   const systemTz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
@@ -309,6 +325,7 @@ export async function run() {
   const serviceStatus = probeServiceStatus();
   const displayName = probeInferredDisplayName();
   const tz = probeTimezone();
+  const hostDeps = probeHostDeps();
 
   const [onecliStatus, cliAgentWired] = await Promise.all([
     probeOnecliStatus(oneCliUrl),
@@ -323,6 +340,7 @@ export async function run() {
   emitStatus('PROBE', {
     OS: osLabel,
     SHELL: shell,
+    HOST_DEPS: hostDeps,
     DOCKER: docker.status,
     IMAGE_PRESENT: docker.imagePresent,
     ONECLI_STATUS: onecliStatus,
