@@ -28,7 +28,6 @@
     "google-auth-library": "^9.15.1",
     "googleapis": "^146.0.0",
     "grammy": "^1.39.3",
-    "openai": "^6.27.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "zod": "^4.3.6"
