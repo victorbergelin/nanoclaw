@@ -302,6 +302,10 @@ function buildContainerArgs(
       '-e',
       `DISCORD_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/discord/sse`,
     );
+    args.push(
+      '-e',
+      `GITHUB_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/github/sse`,
+    );
   } else {
     // Apple MCP bridge — optional. If the host is running apple-mcp via mcp-proxy,
     // the agent connects via SSE through the host gateway.
@@ -325,7 +329,9 @@ function buildContainerArgs(
   // Gmail MCP — only enable when credentials exist on the host.
   // Without this flag, the agent-runner would try to spawn the Gmail MCP and
   // hang on OAuth during every request.
-  if (fs.existsSync(path.join(os.homedir(), '.gmail-mcp', 'credentials.json'))) {
+  if (
+    fs.existsSync(path.join(os.homedir(), '.gmail-mcp', 'credentials.json'))
+  ) {
     args.push('-e', 'GMAIL_MCP_ENABLED=1');
   }
 

@@ -469,6 +469,8 @@ async function runQuery(
         'Skill',
         'NotebookEdit',
         'mcp__nanoclaw__*',
+        'mcp__apple__*',
+        'mcp__discord__*',
         'mcp__gmail__*',
       ],
       env: sdkEnv,
@@ -485,10 +487,30 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
-        gmail: {
-          command: 'npx',
-          args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
-        },
+        ...(process.env.APPLE_MCP_URL && {
+          apple: {
+            type: 'sse' as const,
+            url: process.env.APPLE_MCP_URL,
+          },
+        }),
+        ...(process.env.DISCORD_MCP_URL && {
+          discord: {
+            type: 'sse' as const,
+            url: process.env.DISCORD_MCP_URL,
+          },
+        }),
+        ...(process.env.GITHUB_MCP_URL && {
+          github: {
+            type: 'sse' as const,
+            url: process.env.GITHUB_MCP_URL,
+          },
+        }),
+        ...(process.env.GMAIL_MCP_ENABLED === '1' && {
+          gmail: {
+            command: 'npx',
+            args: ['-y', '@gongrzhe/server-gmail-autoauth-mcp'],
+          },
+        }),
       },
       hooks: {
         PreCompact: [
