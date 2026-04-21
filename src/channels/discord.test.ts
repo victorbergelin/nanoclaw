@@ -1,3 +1,5 @@
+import fs from 'fs';
+
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 
 // --- Mocks ---
@@ -7,6 +9,12 @@ vi.mock('./registry.js', () => ({ registerChannel: vi.fn() }));
 
 // Mock env reader (used by the factory, not needed in unit tests)
 vi.mock('../env.js', () => ({ readEnvFile: vi.fn(() => ({})) }));
+
+// Mock group-folder path resolution so attachment downloads use a predictable
+// test path without touching real group directories.
+vi.mock('../group-folder.js', () => ({
+  resolveGroupFolderPath: (folder: string) => `/tmp/test-groups/${folder}`,
+}));
 
 // Mock config
 vi.mock('../config.js', () => ({
@@ -161,9 +169,7 @@ function createMessage(overrides: {
     member: overrides.memberDisplayName
       ? { displayName: overrides.memberDisplayName }
       : null,
-    guild: overrides.guildName
-      ? { name: overrides.guildName }
-      : null,
+    guild: overrides.guildName ? { name: overrides.guildName } : null,
     channel: {
       name: overrides.channelName ?? 'general',
       messages: {
@@ -490,13 +496,39 @@ describe('DiscordChannel', () => {
   // --- Attachments ---
 
   describe('attachments', () => {
-    it('stores image attachment with placeholder', async () => {
+    beforeEach(() => {
+      // Mock fs + fetch so downloadAttachment runs without hitting disk or
+      // the network. Assertions below test the "saved to <container path>"
+      // success path produced by the mocked success response.
+      vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+      vi.spyOn(fs, 'writeFileSync').mockReturnValue(undefined);
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({
+          ok: true,
+          arrayBuffer: vi.fn().mockResolvedValue(new ArrayBuffer(8)),
+        }),
+      );
+    });
+
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it('downloads image attachment to group folder', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'photo.png', contentType: 'image/png' }],
+        [
+          'att1',
+          {
+            name: 'photo.png',
+            contentType: 'image/png',
+            url: 'https://cdn.example/photo.png',
+          },
+        ],
       ]);
       const msg = createMessage({
         content: '',
@@ -508,18 +540,26 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: '[Image: photo.png]',
+          content:
+            '[Image: photo.png — saved to /workspace/group/attachments/photo.png]',
         }),
       );
     });
 
-    it('stores video attachment with placeholder', async () => {
+    it('downloads video attachment to group folder', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'clip.mp4', contentType: 'video/mp4' }],
+        [
+          'att1',
+          {
+            name: 'clip.mp4',
+            contentType: 'video/mp4',
+            url: 'https://cdn.example/clip.mp4',
+          },
+        ],
       ]);
       const msg = createMessage({
         content: '',
@@ -531,18 +571,26 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: '[Video: clip.mp4]',
+          content:
+            '[Video: clip.mp4 — saved to /workspace/group/attachments/clip.mp4]',
         }),
       );
     });
 
-    it('stores file attachment with placeholder', async () => {
+    it('downloads file attachment to group folder', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'report.pdf', contentType: 'application/pdf' }],
+        [
+          'att1',
+          {
+            name: 'report.pdf',
+            contentType: 'application/pdf',
+            url: 'https://cdn.example/report.pdf',
+          },
+        ],
       ]);
       const msg = createMessage({
         content: '',
@@ -554,18 +602,26 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: '[File: report.pdf]',
+          content:
+            '[File: report.pdf — saved to /workspace/group/attachments/report.pdf]',
         }),
       );
     });
 
-    it('includes text content with attachments', async () => {
+    it('includes text content with downloaded attachments', async () => {
       const opts = createTestOpts();
       const channel = new DiscordChannel('test-token', opts);
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'photo.jpg', contentType: 'image/jpeg' }],
+        [
+          'att1',
+          {
+            name: 'photo.jpg',
+            contentType: 'image/jpeg',
+            url: 'https://cdn.example/photo.jpg',
+          },
+        ],
       ]);
       const msg = createMessage({
         content: 'Check this out',
@@ -577,7 +633,8 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: 'Check this out\n[Image: photo.jpg]',
+          content:
+            'Check this out\n[Image: photo.jpg — saved to /workspace/group/attachments/photo.jpg]',
         }),
       );
     });
@@ -588,8 +645,22 @@ describe('DiscordChannel', () => {
       await channel.connect();
 
       const attachments = new Map([
-        ['att1', { name: 'a.png', contentType: 'image/png' }],
-        ['att2', { name: 'b.txt', contentType: 'text/plain' }],
+        [
+          'att1',
+          {
+            name: 'a.png',
+            contentType: 'image/png',
+            url: 'https://cdn.example/a.png',
+          },
+        ],
+        [
+          'att2',
+          {
+            name: 'b.txt',
+            contentType: 'text/plain',
+            url: 'https://cdn.example/b.txt',
+          },
+        ],
       ]);
       const msg = createMessage({
         content: '',
@@ -601,7 +672,42 @@ describe('DiscordChannel', () => {
       expect(opts.onMessage).toHaveBeenCalledWith(
         'dc:1234567890123456',
         expect.objectContaining({
-          content: '[Image: a.png]\n[File: b.txt]',
+          content:
+            '[Image: a.png — saved to /workspace/group/attachments/a.png]\n[File: b.txt — saved to /workspace/group/attachments/b.txt]',
+        }),
+      );
+    });
+
+    it('emits download-failed placeholder when fetch errors', async () => {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue({ ok: false, status: 500 }),
+      );
+      const opts = createTestOpts();
+      const channel = new DiscordChannel('test-token', opts);
+      await channel.connect();
+
+      const attachments = new Map([
+        [
+          'att1',
+          {
+            name: 'broken.png',
+            contentType: 'image/png',
+            url: 'https://cdn.example/broken.png',
+          },
+        ],
+      ]);
+      const msg = createMessage({
+        content: '',
+        attachments,
+        guildName: 'Server',
+      });
+      await triggerMessage(msg);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'dc:1234567890123456',
+        expect.objectContaining({
+          content: '[Image: broken.png — download failed]',
         }),
       );
     });
@@ -641,8 +747,11 @@ describe('DiscordChannel', () => {
 
       await channel.sendMessage('dc:1234567890123456', 'Hello');
 
-      const fetchedChannel = await currentClient().channels.fetch('1234567890123456');
-      expect(currentClient().channels.fetch).toHaveBeenCalledWith('1234567890123456');
+      const fetchedChannel =
+        await currentClient().channels.fetch('1234567890123456');
+      expect(currentClient().channels.fetch).toHaveBeenCalledWith(
+        '1234567890123456',
+      );
     });
 
     it('strips dc: prefix from JID', async () => {

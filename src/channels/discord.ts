@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+
 import {
   Client,
   Events,
@@ -8,6 +11,7 @@ import {
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
+import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
 import { transcribeAudioBuffer } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
@@ -38,6 +42,40 @@ export class DiscordChannel implements Channel {
    *  doesn't vanish mid-thought. */
   private typingIntervals = new Map<string, NodeJS.Timeout>();
   private static readonly TYPING_REFRESH_MS = 8000;
+
+  /** Download a Discord attachment to the group's attachments directory.
+   *  Returns the container-relative path (e.g. /workspace/group/attachments/<name>)
+   *  or null if the download fails. Matches the Telegram channel pattern
+   *  so the agent can actually read the file rather than seeing a bare
+   *  "[File: name]" placeholder. */
+  private async downloadAttachment(
+    url: string,
+    groupFolder: string,
+    filename: string,
+  ): Promise<string | null> {
+    try {
+      const groupDir = resolveGroupFolderPath(groupFolder);
+      const attachDir = path.join(groupDir, 'attachments');
+      fs.mkdirSync(attachDir, { recursive: true });
+      const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const destPath = path.join(attachDir, safeName);
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        logger.warn(
+          { url, status: resp.status },
+          'Discord attachment download failed',
+        );
+        return null;
+      }
+      const buffer = Buffer.from(await resp.arrayBuffer());
+      fs.writeFileSync(destPath, buffer);
+      logger.info({ dest: destPath }, 'Discord attachment downloaded');
+      return `/workspace/group/attachments/${safeName}`;
+    } catch (err) {
+      logger.error({ url, err }, 'Failed to download Discord attachment');
+      return null;
+    }
+  }
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -101,52 +139,6 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — transcribe audio, placeholder the rest.
-      if (message.attachments.size > 0) {
-        const attachmentDescriptions: string[] = [];
-        for (const att of message.attachments.values()) {
-          const contentType = att.contentType || '';
-          if (contentType.startsWith('audio/')) {
-            try {
-              const resp = await fetch(att.url);
-              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-              const buf = Buffer.from(await resp.arrayBuffer());
-              const transcript = await transcribeAudioBuffer(buf);
-              if (transcript) {
-                attachmentDescriptions.push(`[Voice: ${transcript}]`);
-                logger.info(
-                  { length: transcript.length, filename: att.name },
-                  'Transcribed Discord audio attachment',
-                );
-              } else {
-                attachmentDescriptions.push(
-                  `[Audio: ${att.name || 'audio'} — transcription unavailable]`,
-                );
-              }
-            } catch (err) {
-              logger.error(
-                { err, url: att.url },
-                'Discord audio transcription failed',
-              );
-              attachmentDescriptions.push(
-                `[Audio: ${att.name || 'audio'} — transcription failed]`,
-              );
-            }
-          } else if (contentType.startsWith('image/')) {
-            attachmentDescriptions.push(`[Image: ${att.name || 'image'}]`);
-          } else if (contentType.startsWith('video/')) {
-            attachmentDescriptions.push(`[Video: ${att.name || 'video'}]`);
-          } else {
-            attachmentDescriptions.push(`[File: ${att.name || 'file'}]`);
-          }
-        }
-        if (content) {
-          content = `${content}\n${attachmentDescriptions.join('\n')}`;
-        } else {
-          content = attachmentDescriptions.join('\n');
-        }
-      }
-
       // Handle reply context — include who the user is replying to
       if (message.reference?.messageId) {
         try {
@@ -204,6 +196,63 @@ export class DiscordChannel implements Channel {
           'Message from unregistered Discord channel',
         );
         return;
+      }
+
+      // Attachment handling — audio is transcribed inline; everything else
+      // is downloaded into the group's attachments/ so the container agent
+      // can actually open the file, matching the Telegram behavior.
+      if (message.attachments.size > 0) {
+        const attachmentDescriptions: string[] = [];
+        for (const att of message.attachments.values()) {
+          const contentType = att.contentType || '';
+          const name = att.name || 'attachment';
+          if (contentType.startsWith('audio/')) {
+            try {
+              const resp = await fetch(att.url);
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+              const buf = Buffer.from(await resp.arrayBuffer());
+              const transcript = await transcribeAudioBuffer(buf);
+              if (transcript) {
+                attachmentDescriptions.push(`[Voice: ${transcript}]`);
+                logger.info(
+                  { length: transcript.length, filename: att.name },
+                  'Transcribed Discord audio attachment',
+                );
+              } else {
+                attachmentDescriptions.push(
+                  `[Audio: ${name} — transcription unavailable]`,
+                );
+              }
+            } catch (err) {
+              logger.error(
+                { err, url: att.url },
+                'Discord audio transcription failed',
+              );
+              attachmentDescriptions.push(
+                `[Audio: ${name} — transcription failed]`,
+              );
+            }
+          } else {
+            const localPath = await this.downloadAttachment(
+              att.url,
+              group.folder,
+              name,
+            );
+            const label = contentType.startsWith('image/')
+              ? 'Image'
+              : contentType.startsWith('video/')
+                ? 'Video'
+                : 'File';
+            attachmentDescriptions.push(
+              localPath
+                ? `[${label}: ${name} — saved to ${localPath}]`
+                : `[${label}: ${name} — download failed]`,
+            );
+          }
+        }
+        content = content
+          ? `${content}\n${attachmentDescriptions.join('\n')}`
+          : attachmentDescriptions.join('\n');
       }
 
       // Route both store and process under effectiveJid (may be the guild).
