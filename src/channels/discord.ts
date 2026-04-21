@@ -1,8 +1,15 @@
-import { Client, Events, GatewayIntentBits, Message, TextChannel } from 'discord.js';
+import {
+  Client,
+  Events,
+  GatewayIntentBits,
+  Message,
+  TextChannel,
+} from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
 import { readEnvFile } from '../env.js';
 import { logger } from '../logger.js';
+import { transcribeAudioBuffer } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
@@ -23,6 +30,14 @@ export class DiscordChannel implements Channel {
   private client: Client | null = null;
   private opts: DiscordChannelOpts;
   private botToken: string;
+  /** Remembers the last-active channel per guild for reply routing when
+   *  a guild-level registration (dc:guild:<guildId>) is used. */
+  private guildLastChannel = new Map<string, string>();
+  /** Per-jid re-send timers. Discord's sendTyping() shows the indicator for
+   *  ~10s; long agent replies need periodic refreshes so the indicator
+   *  doesn't vanish mid-thought. */
+  private typingIntervals = new Map<string, NodeJS.Timeout>();
+  private static readonly TYPING_REFRESH_MS = 8000;
 
   constructor(botToken: string, opts: DiscordChannelOpts) {
     this.botToken = botToken;
@@ -86,20 +101,45 @@ export class DiscordChannel implements Channel {
         }
       }
 
-      // Handle attachments — store placeholders so the agent knows something was sent
+      // Handle attachments — transcribe audio, placeholder the rest.
       if (message.attachments.size > 0) {
-        const attachmentDescriptions = [...message.attachments.values()].map((att) => {
+        const attachmentDescriptions: string[] = [];
+        for (const att of message.attachments.values()) {
           const contentType = att.contentType || '';
-          if (contentType.startsWith('image/')) {
-            return `[Image: ${att.name || 'image'}]`;
+          if (contentType.startsWith('audio/')) {
+            try {
+              const resp = await fetch(att.url);
+              if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+              const buf = Buffer.from(await resp.arrayBuffer());
+              const transcript = await transcribeAudioBuffer(buf);
+              if (transcript) {
+                attachmentDescriptions.push(`[Voice: ${transcript}]`);
+                logger.info(
+                  { length: transcript.length, filename: att.name },
+                  'Transcribed Discord audio attachment',
+                );
+              } else {
+                attachmentDescriptions.push(
+                  `[Audio: ${att.name || 'audio'} — transcription unavailable]`,
+                );
+              }
+            } catch (err) {
+              logger.error(
+                { err, url: att.url },
+                'Discord audio transcription failed',
+              );
+              attachmentDescriptions.push(
+                `[Audio: ${att.name || 'audio'} — transcription failed]`,
+              );
+            }
+          } else if (contentType.startsWith('image/')) {
+            attachmentDescriptions.push(`[Image: ${att.name || 'image'}]`);
           } else if (contentType.startsWith('video/')) {
-            return `[Video: ${att.name || 'video'}]`;
-          } else if (contentType.startsWith('audio/')) {
-            return `[Audio: ${att.name || 'audio'}]`;
+            attachmentDescriptions.push(`[Video: ${att.name || 'video'}]`);
           } else {
-            return `[File: ${att.name || 'file'}]`;
+            attachmentDescriptions.push(`[File: ${att.name || 'file'}]`);
           }
-        });
+        }
         if (content) {
           content = `${content}\n${attachmentDescriptions.join('\n')}`;
         } else {
@@ -125,10 +165,39 @@ export class DiscordChannel implements Channel {
 
       // Store chat metadata for discovery
       const isGroup = message.guild !== null;
-      this.opts.onChatMetadata(chatJid, timestamp, chatName, 'discord', isGroup);
+      this.opts.onChatMetadata(
+        chatJid,
+        timestamp,
+        chatName,
+        'discord',
+        isGroup,
+      );
 
-      // Only deliver full message for registered groups
-      const group = this.opts.registeredGroups()[chatJid];
+      // Only deliver full message for registered groups.
+      // Fallback: if the specific channel isn't registered, check for a
+      // guild-level registration (dc:guild:<guildId>) — lets the bot respond
+      // in every channel of a server with a single registration. We also
+      // remember the last-active channel per guild so outbound replies land
+      // in the correct channel.
+      const groups = this.opts.registeredGroups();
+      let group = groups[chatJid];
+      let effectiveJid = chatJid;
+      if (!group && message.guild) {
+        const guildJid = `dc:guild:${message.guild.id}`;
+        if (groups[guildJid]) {
+          group = groups[guildJid];
+          effectiveJid = guildJid;
+          this.guildLastChannel.set(message.guild.id, channelId);
+          // Ensure the guild JID has a chats row so FK constraints succeed.
+          this.opts.onChatMetadata(
+            effectiveJid,
+            timestamp,
+            message.guild.name,
+            'discord',
+            true,
+          );
+        }
+      }
       if (!group) {
         logger.debug(
           { chatJid, chatName },
@@ -137,10 +206,10 @@ export class DiscordChannel implements Channel {
         return;
       }
 
-      // Deliver message — startMessageLoop() will pick it up
-      this.opts.onMessage(chatJid, {
+      // Route both store and process under effectiveJid (may be the guild).
+      this.opts.onMessage(effectiveJid, {
         id: msgId,
-        chat_jid: chatJid,
+        chat_jid: effectiveJid,
         sender,
         sender_name: senderName,
         content,
@@ -176,6 +245,26 @@ export class DiscordChannel implements Channel {
     });
   }
 
+  /** Resolve a nanoclaw JID to the Discord channel we should act on.
+   *  Handles both `dc:<channelId>` and `dc:guild:<guildId>` forms; the
+   *  latter falls back to the last-active channel or the guild's system
+   *  channel. Returns null if no channel can be determined. */
+  private async resolveChannelId(jid: string): Promise<string | null> {
+    if (!this.client) return null;
+    if (jid.startsWith('dc:guild:')) {
+      const guildId = jid.replace(/^dc:guild:/, '');
+      const last = this.guildLastChannel.get(guildId);
+      if (last) return last;
+      try {
+        const guild = await this.client.guilds.fetch(guildId);
+        return guild.systemChannelId ?? null;
+      } catch {
+        return null;
+      }
+    }
+    return jid.replace(/^dc:/, '');
+  }
+
   async sendMessage(jid: string, text: string): Promise<void> {
     if (!this.client) {
       logger.warn('Discord client not initialized');
@@ -183,7 +272,12 @@ export class DiscordChannel implements Channel {
     }
 
     try {
-      const channelId = jid.replace(/^dc:/, '');
+      const channelId = await this.resolveChannelId(jid);
+      if (!channelId) {
+        logger.warn({ jid }, 'Guild has no last-active or system channel');
+        return;
+      }
+
       const channel = await this.client.channels.fetch(channelId);
 
       if (!channel || !('send' in channel)) {
@@ -202,7 +296,10 @@ export class DiscordChannel implements Channel {
           await textChannel.send(text.slice(i, i + MAX_LENGTH));
         }
       }
-      logger.info({ jid, length: text.length }, 'Discord message sent');
+      logger.info(
+        { jid, channelId, length: text.length },
+        'Discord message sent',
+      );
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
     }
@@ -217,6 +314,8 @@ export class DiscordChannel implements Channel {
   }
 
   async disconnect(): Promise<void> {
+    for (const timer of this.typingIntervals.values()) clearInterval(timer);
+    this.typingIntervals.clear();
     if (this.client) {
       this.client.destroy();
       this.client = null;
@@ -225,15 +324,36 @@ export class DiscordChannel implements Channel {
   }
 
   async setTyping(jid: string, isTyping: boolean): Promise<void> {
-    if (!this.client || !isTyping) return;
-    try {
-      const channelId = jid.replace(/^dc:/, '');
-      const channel = await this.client.channels.fetch(channelId);
-      if (channel && 'sendTyping' in channel) {
-        await (channel as TextChannel).sendTyping();
+    if (!this.client) return;
+
+    if (!isTyping) {
+      const existing = this.typingIntervals.get(jid);
+      if (existing) {
+        clearInterval(existing);
+        this.typingIntervals.delete(jid);
       }
-    } catch (err) {
-      logger.debug({ jid, err }, 'Failed to send Discord typing indicator');
+      return;
+    }
+
+    const sendOnce = async () => {
+      try {
+        const channelId = await this.resolveChannelId(jid);
+        if (!channelId) return;
+        const channel = await this.client!.channels.fetch(channelId);
+        if (channel && 'sendTyping' in channel) {
+          await (channel as TextChannel).sendTyping();
+        }
+      } catch (err) {
+        logger.debug({ jid, err }, 'Failed to send Discord typing indicator');
+      }
+    };
+
+    await sendOnce();
+    // Discord shows the indicator for ~10s; refresh while the reply is pending
+    // so the user keeps seeing "Bottis is typing..." until setTyping(jid,false).
+    if (!this.typingIntervals.has(jid)) {
+      const timer = setInterval(sendOnce, DiscordChannel.TYPING_REFRESH_MS);
+      this.typingIntervals.set(jid, timer);
     }
   }
 }
