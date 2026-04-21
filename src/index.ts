@@ -622,6 +622,25 @@ async function main(): Promise<void> {
         return;
       }
 
+      // Container control commands — stop or restart the agent container
+      // for this group. Accepts a bare "/stop" / "/restart" and variants
+      // like "@Bottis /stop" or "/stop@botname" (Telegram group style).
+      const CONTROL_CMD_RE =
+        /^(?:@\S+\s+)?\/(stop|restart)(?:@\S+)?\s*$/i;
+      const ctrl = trimmed.match(CONTROL_CMD_RE);
+      if (ctrl && registeredGroups[chatJid]) {
+        const cmd = ctrl[1].toLowerCase();
+        const channel = findChannel(channels, chatJid);
+        const stopped = queue.stopActiveContainer(chatJid);
+        const reply = stopped
+          ? `🛑 Agent ${cmd === 'stop' ? 'stopped' : 'restarted'}. Send a new message to start again.`
+          : `No active agent to ${cmd}.`;
+        channel?.sendMessage(chatJid, reply).catch((err) =>
+          logger.error({ err, chatJid }, 'Control command reply failed'),
+        );
+        return;
+      }
+
       // Sender allowlist drop mode: discard messages from denied senders before storing
       if (!msg.is_from_me && !msg.is_bot_message && registeredGroups[chatJid]) {
         const cfg = loadSenderAllowlist();

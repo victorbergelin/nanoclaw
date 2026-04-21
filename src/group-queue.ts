@@ -3,6 +3,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { DATA_DIR, MAX_CONCURRENT_CONTAINERS } from './config.js';
+import { stopContainer } from './container-runtime.js';
 import { logger } from './logger.js';
 
 interface QueuedTask {
@@ -127,6 +128,33 @@ export class GroupQueue {
     this.runTask(groupJid, { id: taskId, groupJid, fn }).catch((err) =>
       logger.error({ groupJid, taskId, err }, 'Unhandled error in runTask'),
     );
+  }
+
+  /**
+   * Stop the active container for a group, if any. Invoked by user
+   * commands (/stop, /restart). The registered child process exits on
+   * its own once the container runtime tears down the VM, which releases
+   * the queue slot and lets the next message spawn a fresh container.
+   * Returns true if something was stopped, false if no active container.
+   */
+  stopActiveContainer(groupJid: string): boolean {
+    const state = this.groups.get(groupJid);
+    if (!state || !state.active || !state.containerName) return false;
+    const containerName = state.containerName;
+    try {
+      stopContainer(containerName);
+      logger.info(
+        { groupJid, containerName },
+        'Active container stopped by user command',
+      );
+      return true;
+    } catch (err) {
+      logger.error(
+        { groupJid, containerName, err },
+        'Failed to stop container on user command',
+      );
+      return false;
+    }
   }
 
   registerProcess(

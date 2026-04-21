@@ -8,6 +8,11 @@ vi.mock('./config.js', () => ({
   MAX_CONCURRENT_CONTAINERS: 2,
 }));
 
+// Mock container-runtime so stopActiveContainer doesn't shell out.
+vi.mock('./container-runtime.js', () => ({
+  stopContainer: vi.fn(),
+}));
+
 // Mock fs operations used by sendMessage/closeStdin
 vi.mock('fs', async () => {
   const actual = await vi.importActual<typeof import('fs')>('fs');
@@ -479,6 +484,79 @@ describe('GroupQueue', () => {
     expect(closeWrites).toHaveLength(1);
 
     resolveProcess!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  // --- stopActiveContainer (user /stop, /restart commands) ---
+
+  it('stopActiveContainer stops an active container and returns true', async () => {
+    const { stopContainer } = await import('./container-runtime.js');
+    const stopMock = vi.mocked(stopContainer);
+    stopMock.mockClear();
+
+    let resolveProc: () => void;
+    const procPromise = new Promise<void>((r) => {
+      resolveProc = r;
+    });
+
+    queue.setProcessMessagesFn(async () => {
+      await procPromise;
+      return true;
+    });
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(5);
+
+    // Container becomes registered once it's actually spawned
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'nanoclaw-discord-main-42',
+      'test-group',
+    );
+
+    expect(queue.stopActiveContainer('group1@g.us')).toBe(true);
+    expect(stopMock).toHaveBeenCalledWith('nanoclaw-discord-main-42');
+
+    resolveProc!();
+    await vi.advanceTimersByTimeAsync(10);
+  });
+
+  it('stopActiveContainer returns false when no active container', async () => {
+    const { stopContainer } = await import('./container-runtime.js');
+    const stopMock = vi.mocked(stopContainer);
+    stopMock.mockClear();
+
+    expect(queue.stopActiveContainer('never-registered@g.us')).toBe(false);
+    expect(stopMock).not.toHaveBeenCalled();
+  });
+
+  it('stopActiveContainer returns false when stopContainer throws', async () => {
+    const { stopContainer } = await import('./container-runtime.js');
+    const stopMock = vi.mocked(stopContainer);
+    stopMock.mockClear();
+    stopMock.mockImplementationOnce(() => {
+      throw new Error('runtime unreachable');
+    });
+
+    let resolveProc: () => void;
+    const procPromise = new Promise<void>((r) => {
+      resolveProc = r;
+    });
+    queue.setProcessMessagesFn(async () => {
+      await procPromise;
+      return true;
+    });
+    queue.enqueueMessageCheck('group1@g.us');
+    await vi.advanceTimersByTimeAsync(5);
+    queue.registerProcess(
+      'group1@g.us',
+      {} as any,
+      'nanoclaw-c-2',
+      'test-group',
+    );
+
+    expect(queue.stopActiveContainer('group1@g.us')).toBe(false);
+    resolveProc!();
     await vi.advanceTimersByTimeAsync(10);
   });
 });
