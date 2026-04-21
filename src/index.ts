@@ -625,8 +625,7 @@ async function main(): Promise<void> {
       // Container control commands — stop or restart the agent container
       // for this group. Accepts a bare "/stop" / "/restart" and variants
       // like "@Bottis /stop" or "/stop@botname" (Telegram group style).
-      const CONTROL_CMD_RE =
-        /^(?:@\S+\s+)?\/(stop|restart)(?:@\S+)?\s*$/i;
+      const CONTROL_CMD_RE = /^(?:@\S+\s+)?\/(stop|restart)(?:@\S+)?\s*$/i;
       const ctrl = trimmed.match(CONTROL_CMD_RE);
       if (ctrl && registeredGroups[chatJid]) {
         const cmd = ctrl[1].toLowerCase();
@@ -635,9 +634,11 @@ async function main(): Promise<void> {
         const reply = stopped
           ? `🛑 Agent ${cmd === 'stop' ? 'stopped' : 'restarted'}. Send a new message to start again.`
           : `No active agent to ${cmd}.`;
-        channel?.sendMessage(chatJid, reply).catch((err) =>
-          logger.error({ err, chatJid }, 'Control command reply failed'),
-        );
+        channel
+          ?.sendMessage(chatJid, reply)
+          .catch((err) =>
+            logger.error({ err, chatJid }, 'Control command reply failed'),
+          );
         return;
       }
 
