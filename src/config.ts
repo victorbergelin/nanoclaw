@@ -7,7 +7,16 @@ import { isValidTimezone } from './timezone.js';
 // Read config values from .env (falls back to process.env).
 // Secrets (API keys, tokens) are NOT read here — they are loaded only
 // by the credential proxy (credential-proxy.ts), never exposed to containers.
-const envConfig = readEnvFile(['ASSISTANT_NAME', 'ASSISTANT_HAS_OWN_NUMBER', 'TZ']);
+const envConfig = readEnvFile([
+  'ASSISTANT_NAME',
+  'ASSISTANT_HAS_OWN_NUMBER',
+  'TZ',
+  'CREDENTIAL_PROXY_PORT',
+  'APPLE_MCP_PORT',
+  'DISCORD_MCP_PORT',
+  'MCP_HUB_PORT',
+  'GITHUB_TOKEN',
+]);
 
 export const ASSISTANT_NAME =
   process.env.ASSISTANT_NAME || envConfig.ASSISTANT_NAME || 'Andy';
@@ -49,9 +58,20 @@ export const CONTAINER_MAX_OUTPUT_SIZE = parseInt(
   10,
 ); // 10MB default
 export const CREDENTIAL_PROXY_PORT = parseInt(
-  process.env.CREDENTIAL_PROXY_PORT || '3001',
+  process.env.CREDENTIAL_PROXY_PORT || envConfig.CREDENTIAL_PROXY_PORT || '3001',
   10,
 );
+export const APPLE_MCP_PORT =
+  process.env.APPLE_MCP_PORT || envConfig.APPLE_MCP_PORT;
+export const DISCORD_MCP_PORT =
+  process.env.DISCORD_MCP_PORT || envConfig.DISCORD_MCP_PORT;
+// Consolidated MCP hub (TBXark/mcp-proxy). When set, supersedes
+// per-server APPLE_MCP_PORT / DISCORD_MCP_PORT — the container agent
+// reaches apple at /apple/sse, discord at /discord/sse on this port.
+export const MCP_HUB_PORT =
+  process.env.MCP_HUB_PORT || envConfig.MCP_HUB_PORT;
+export const GITHUB_TOKEN =
+  process.env.GITHUB_TOKEN || envConfig.GITHUB_TOKEN;
 export const MAX_MESSAGES_PER_PROMPT = Math.max(
   1,
   parseInt(process.env.MAX_MESSAGES_PER_PROMPT || '10', 10) || 10,

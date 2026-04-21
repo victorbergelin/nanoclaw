@@ -8,11 +8,15 @@ import os from 'os';
 import path from 'path';
 
 import {
+  APPLE_MCP_PORT,
   CONTAINER_IMAGE,
   CONTAINER_MAX_OUTPUT_SIZE,
   CONTAINER_TIMEOUT,
   CREDENTIAL_PROXY_PORT,
   DATA_DIR,
+  DISCORD_MCP_PORT,
+  GITHUB_TOKEN,
+  MCP_HUB_PORT,
   GROUPS_DIR,
   IDLE_TIMEOUT,
   TIMEZONE,
@@ -106,6 +110,32 @@ function buildVolumeMounts(
         readonly: false,
       });
     }
+
+    // Self-edit worktree — writable clone of the NanoClaw repo so main can
+    // modify its own source code via a fork-and-PR workflow. Per-user path;
+    // portable via os.homedir().
+    const selfEditDir = path.join(
+      os.homedir(),
+      'Documents/GitHub/nanoclaw-self-edit',
+    );
+    if (fs.existsSync(selfEditDir)) {
+      mounts.push({
+        hostPath: selfEditDir,
+        containerPath: '/workspace/self',
+        readonly: false,
+      });
+    }
+
+    // GitHub repos dir — writable so main can read/edit across all personal
+    // repos.
+    const githubDir = path.join(os.homedir(), 'Documents/GitHub');
+    if (fs.existsSync(githubDir)) {
+      mounts.push({
+        hostPath: githubDir,
+        containerPath: '/workspace/extra/github',
+        readonly: false,
+      });
+    }
   } else {
     // Other groups only get their own folder
     mounts.push({
@@ -176,14 +206,13 @@ function buildVolumeMounts(
     readonly: false,
   });
 
-  // Gmail credentials directory (for Gmail MCP inside the container)
-  const homeDir = os.homedir();
-  const gmailDir = path.join(homeDir, '.gmail-mcp');
+  // Gmail MCP credentials — mounted read-write so OAuth tokens can refresh.
+  const gmailDir = path.join(os.homedir(), '.gmail-mcp');
   if (fs.existsSync(gmailDir)) {
     mounts.push({
       hostPath: gmailDir,
       containerPath: '/home/node/.gmail-mcp',
-      readonly: false, // MCP may need to refresh OAuth tokens
+      readonly: false,
     });
   }
 
@@ -260,6 +289,53 @@ function buildContainerArgs(
     '-e',
     `ANTHROPIC_BASE_URL=http://${CONTAINER_HOST_GATEWAY}:${CREDENTIAL_PROXY_PORT}`,
   );
+
+  // MCP hub (TBXark/mcp-proxy) — single local aggregator that multiplexes
+  // apple, discord, and other servers behind one port. If set, supersedes
+  // the per-server APPLE_MCP_PORT / DISCORD_MCP_PORT variables below.
+  if (MCP_HUB_PORT) {
+    args.push(
+      '-e',
+      `APPLE_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/apple/sse`,
+    );
+    args.push(
+      '-e',
+      `DISCORD_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/discord/sse`,
+    );
+  } else {
+    // Apple MCP bridge — optional. If the host is running apple-mcp via mcp-proxy,
+    // the agent connects via SSE through the host gateway.
+    if (APPLE_MCP_PORT) {
+      args.push(
+        '-e',
+        `APPLE_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${APPLE_MCP_PORT}/sse`,
+      );
+    }
+
+    // Discord MCP bridge — optional. If the host is running discord-mcp via mcp-proxy,
+    // the agent connects via SSE through the host gateway.
+    if (DISCORD_MCP_PORT) {
+      args.push(
+        '-e',
+        `DISCORD_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${DISCORD_MCP_PORT}/sse`,
+      );
+    }
+  }
+
+  // Gmail MCP — only enable when credentials exist on the host.
+  // Without this flag, the agent-runner would try to spawn the Gmail MCP and
+  // hang on OAuth during every request.
+  if (fs.existsSync(path.join(os.homedir(), '.gmail-mcp', 'credentials.json'))) {
+    args.push('-e', 'GMAIL_MCP_ENABLED=1');
+  }
+
+  // GitHub token for `gh` CLI inside the container (self-edit PR workflow).
+  // GH_TOKEN is the canonical gh env var; GITHUB_TOKEN is used by many other
+  // tools (git credential helper, actions). No-op if the host hasn't set it.
+  if (GITHUB_TOKEN) {
+    args.push('-e', `GH_TOKEN=${GITHUB_TOKEN}`);
+    args.push('-e', `GITHUB_TOKEN=${GITHUB_TOKEN}`);
+  }
 
   // Mirror the host's auth method with a placeholder value.
   // API key mode: SDK sends x-api-key, proxy replaces with real key.
