@@ -80,19 +80,27 @@ export function stopContainer(name: string): void {
  * second node process without having to spawn a fresh container. Rejects
  * obvious shell metacharacters in the container name; callers are
  * responsible for validating the rest of the argv.
+ *
+ * Runs as the `node` user by default so the exec process inherits the
+ * same HOME (/home/node) the main agent uses — without this, the
+ * Claude Code SDK child can't find its settings/state and exits 1.
  */
 export function execInContainer(
   name: string,
   args: string[],
-  opts: { timeoutMs?: number } = {},
+  opts: { timeoutMs?: number; asUser?: string } = {},
 ): void {
   if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
     throw new Error(`Invalid container name: ${name}`);
   }
+  const user = opts.asUser ?? 'node';
   // execSync captures stdio into buffers; we don't care about stdout here —
   // the sidecar writes its answer to a shared file that the host polls.
   // Detach-style: start and return; caller polls the answer file.
-  const proc = spawn(CONTAINER_RUNTIME_BIN, ['exec', name, ...args], {
+  const proc = spawn(
+    CONTAINER_RUNTIME_BIN,
+    ['exec', '--user', user, name, ...args],
+    {
     stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
   });
