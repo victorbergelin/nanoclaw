@@ -501,6 +501,10 @@ async function runQuery(
       prompt: stream,
       options: {
         cwd: '/workspace/group',
+        // Default to Opus 4.7 for all groups. Override via the NANOCLAW_MODEL
+        // env var at spawn time if you need to pick a different model per
+        // group or for one-off debugging runs.
+        model: process.env.NANOCLAW_MODEL || 'claude-opus-4-7',
         additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
