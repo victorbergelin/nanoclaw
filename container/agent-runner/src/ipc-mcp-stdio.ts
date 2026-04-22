@@ -14,6 +14,43 @@ import { CronExpressionParser } from 'cron-parser';
 const IPC_DIR = '/workspace/ipc';
 const MESSAGES_DIR = path.join(IPC_DIR, 'messages');
 const TASKS_DIR = path.join(IPC_DIR, 'tasks');
+const QUERIES_DIR = path.join(IPC_DIR, 'queries');
+const QUERY_RESULTS_DIR = path.join(IPC_DIR, 'query-results');
+
+/**
+ * Write a shared-history query and wait for the host's response. Used by
+ * list_conversations / get_messages / search_messages. Polls a short
+ * timeout since these are interactive — the host's IPC watcher normally
+ * handles a query within one poll cycle (~1s).
+ */
+async function writeQueryAndWait(
+  payload: Record<string, unknown>,
+  timeoutMs = 5000,
+): Promise<unknown> {
+  fs.mkdirSync(QUERIES_DIR, { recursive: true });
+  fs.mkdirSync(QUERY_RESULTS_DIR, { recursive: true });
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const queryPath = path.join(QUERIES_DIR, `${id}.json`);
+  const resultPath = path.join(QUERY_RESULTS_DIR, `${id}.json`);
+  const tmpPath = `${queryPath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify(payload));
+  fs.renameSync(tmpPath, queryPath);
+
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (fs.existsSync(resultPath)) {
+      const body = JSON.parse(fs.readFileSync(resultPath, 'utf-8'));
+      try {
+        fs.unlinkSync(resultPath);
+      } catch {
+        /* ignore */
+      }
+      return body;
+    }
+    await new Promise((r) => setTimeout(r, 150));
+  }
+  throw new Error(`Query timed out after ${timeoutMs}ms`);
+}
 
 // Context from environment variables (set by the agent runner)
 const chatJid = process.env.NANOCLAW_CHAT_JID!;
@@ -497,6 +534,115 @@ Use available_groups.json to find the JID for a group. The folder name must be c
         {
           type: 'text' as const,
           text: `Group "${args.name}" registered. It will start receiving messages immediately.`,
+        },
+      ],
+    };
+  },
+);
+
+// --- Shared-history tools (Phase 2a: cross-channel reference) ---
+// These let the agent reach across channels: "what did I tell you on
+// Discord yesterday?" Non-main groups are silently restricted to their
+// own chat_jid by the host handler, so the tool descriptions below
+// present the cross-chat surface and let the host apply the policy.
+
+server.tool(
+  'list_conversations',
+  'List all known conversations across channels (Discord, Telegram, WhatsApp), ordered by most recent activity. Each entry has chatJid, name, channel, and messageCount. Main groups see all; other groups only see their own.',
+  {},
+  async () => {
+    const body = (await writeQueryAndWait({
+      type: 'list-conversations',
+    })) as { conversations?: unknown[] };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify(body.conversations ?? [], null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'get_messages',
+  'Fetch recent messages from a specific conversation (any channel). Useful for "continue the conversation we were having in Discord". Non-main groups can only query their own chat.',
+  {
+    chatJid: z
+      .string()
+      .describe(
+        'Target chat identifier (e.g. dc:guild:... for Discord, tg:... for Telegram).',
+      ),
+    limit: z
+      .number()
+      .int()
+      .optional()
+      .describe('Max messages to return (default 50, max 500).'),
+    since: z
+      .string()
+      .optional()
+      .describe('ISO timestamp; only messages at or after this time.'),
+    until: z
+      .string()
+      .optional()
+      .describe('ISO timestamp; only messages at or before this time.'),
+  },
+  async (args) => {
+    const body = (await writeQueryAndWait({
+      type: 'get-messages',
+      chatJid: args.chatJid,
+      limit: args.limit,
+      since: args.since,
+      until: args.until,
+    })) as { messages?: unknown[]; error?: string };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: body.error
+            ? `Error: ${body.error}`
+            : JSON.stringify(body.messages ?? [], null, 2),
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'search_messages',
+  'Search message content across conversations with a substring match. Useful for recalling a past topic ("the Saddler bag we talked about"). Non-main groups are silently scoped to their own chat.',
+  {
+    query: z.string().describe('Substring to match in message content.'),
+    chatJid: z
+      .string()
+      .optional()
+      .describe('Restrict search to a single chat (optional).'),
+    channel: z
+      .string()
+      .optional()
+      .describe('Restrict to a channel: discord | telegram | whatsapp.'),
+    limit: z
+      .number()
+      .int()
+      .optional()
+      .describe('Max results (default 50, max 500).'),
+  },
+  async (args) => {
+    const body = (await writeQueryAndWait({
+      type: 'search-messages',
+      query: args.query,
+      chatJid: args.chatJid,
+      channel: args.channel,
+      limit: args.limit,
+    })) as { messages?: unknown[]; error?: string };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: body.error
+            ? `Error: ${body.error}`
+            : JSON.stringify(body.messages ?? [], null, 2),
         },
       ],
     };

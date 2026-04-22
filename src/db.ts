@@ -414,6 +414,115 @@ export function getMessageContentById(
   return row?.content;
 }
 
+// --- Cross-channel reference helpers (Phase 2a shared-history tool) ---
+// These back the `nanoclaw` MCP tools list_conversations, get_messages,
+// and search_messages. Permission filtering happens in the IPC handler
+// (non-main groups are restricted to their own chat_jid before calling
+// in), so these helpers trust their caller.
+
+export interface ConversationSummary {
+  chatJid: string;
+  name: string;
+  channel: string;
+  isGroup: boolean;
+  lastMessageTime: string;
+  messageCount: number;
+}
+
+export function listConversations(): ConversationSummary[] {
+  const rows = db
+    .prepare(
+      `SELECT c.jid, c.name, c.channel, c.is_group, c.last_message_time,
+              (SELECT COUNT(*) FROM messages m WHERE m.chat_jid = c.jid) AS msg_count
+       FROM chats c
+       WHERE c.jid != '__group_sync__'
+       ORDER BY c.last_message_time DESC`,
+    )
+    .all() as {
+    jid: string;
+    name: string;
+    channel: string;
+    is_group: number;
+    last_message_time: string;
+    msg_count: number;
+  }[];
+  return rows.map((r) => ({
+    chatJid: r.jid,
+    name: r.name,
+    channel: r.channel,
+    isGroup: r.is_group === 1,
+    lastMessageTime: r.last_message_time,
+    messageCount: r.msg_count,
+  }));
+}
+
+export interface GetMessagesOptions {
+  limit?: number;
+  since?: string;
+  until?: string;
+}
+
+export function getMessagesForChat(
+  chatJid: string,
+  opts: GetMessagesOptions = {},
+): NewMessage[] {
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
+  const clauses: string[] = ['chat_jid = ?'];
+  const args: (string | number)[] = [chatJid];
+  if (opts.since) {
+    clauses.push('timestamp >= ?');
+    args.push(opts.since);
+  }
+  if (opts.until) {
+    clauses.push('timestamp <= ?');
+    args.push(opts.until);
+  }
+  const sql = `
+    SELECT id, chat_jid, sender, sender_name, content, timestamp,
+           is_from_me, is_bot_message
+    FROM messages
+    WHERE ${clauses.join(' AND ')}
+    ORDER BY timestamp DESC
+    LIMIT ?
+  `;
+  args.push(limit);
+  return db.prepare(sql).all(...args) as NewMessage[];
+}
+
+export interface SearchMessagesOptions {
+  chatJid?: string;
+  channel?: string;
+  limit?: number;
+}
+
+export function searchMessages(
+  query: string,
+  opts: SearchMessagesOptions = {},
+): NewMessage[] {
+  const limit = Math.max(1, Math.min(opts.limit ?? 50, 500));
+  const clauses: string[] = ['m.content LIKE ?'];
+  const args: (string | number)[] = [`%${query}%`];
+  if (opts.chatJid) {
+    clauses.push('m.chat_jid = ?');
+    args.push(opts.chatJid);
+  }
+  if (opts.channel) {
+    clauses.push('c.channel = ?');
+    args.push(opts.channel);
+  }
+  const sql = `
+    SELECT m.id, m.chat_jid, m.sender, m.sender_name, m.content, m.timestamp,
+           m.is_from_me, m.is_bot_message
+    FROM messages m
+    JOIN chats c ON c.jid = m.chat_jid
+    WHERE ${clauses.join(' AND ')}
+    ORDER BY m.timestamp DESC
+    LIMIT ?
+  `;
+  args.push(limit);
+  return db.prepare(sql).all(...args) as NewMessage[];
+}
+
 export function createTask(
   task: Omit<ScheduledTask, 'last_run' | 'last_result'>,
 ): void {

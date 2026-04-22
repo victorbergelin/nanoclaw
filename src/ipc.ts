@@ -5,7 +5,15 @@ import { CronExpressionParser } from 'cron-parser';
 
 import { DATA_DIR, IPC_POLL_INTERVAL, TIMEZONE } from './config.js';
 import { AvailableGroup } from './container-runner.js';
-import { createTask, deleteTask, getTaskById, updateTask } from './db.js';
+import {
+  createTask,
+  deleteTask,
+  getMessagesForChat,
+  getTaskById,
+  listConversations,
+  searchMessages,
+  updateTask,
+} from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
 import { RegisteredGroup } from './types.js';
@@ -115,6 +123,55 @@ export function startIpcWatcher(deps: IpcDeps): void {
         );
       }
 
+      // Process shared-history queries from this group's IPC directory.
+      // The container's nanoclaw MCP writes query files here and polls
+      // /workspace/ipc/query-results for responses. Non-main groups can
+      // only read their own chat history — the own-jid check is enforced
+      // below before any DB query runs.
+      const queriesDir = path.join(ipcBaseDir, sourceGroup, 'queries');
+      const resultsDir = path.join(ipcBaseDir, sourceGroup, 'query-results');
+      try {
+        if (fs.existsSync(queriesDir)) {
+          const callerJid = Object.entries(registeredGroups).find(
+            ([, g]) => g.folder === sourceGroup,
+          )?.[0];
+          for (const file of fs
+            .readdirSync(queriesDir)
+            .filter((f) => f.endsWith('.json'))) {
+            const filePath = path.join(queriesDir, file);
+            const id = file.replace(/\.json$/, '');
+            try {
+              const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+              const resp = handleHistoryQuery(data, {
+                isMain,
+                callerJid,
+              });
+              fs.mkdirSync(resultsDir, { recursive: true });
+              const out = path.join(resultsDir, `${id}.json`);
+              const tmp = `${out}.tmp`;
+              fs.writeFileSync(tmp, JSON.stringify(resp));
+              fs.renameSync(tmp, out);
+              fs.unlinkSync(filePath);
+            } catch (err) {
+              logger.error(
+                { file, sourceGroup, err },
+                'Error processing history query',
+              );
+              try {
+                fs.unlinkSync(filePath);
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(
+          { err, sourceGroup },
+          'Error reading IPC queries directory',
+        );
+      }
+
       // Process tasks from this group's IPC directory
       try {
         if (fs.existsSync(tasksDir)) {
@@ -152,6 +209,74 @@ export function startIpcWatcher(deps: IpcDeps): void {
 
   processIpcFiles();
   logger.info('IPC watcher started (per-group namespaces)');
+}
+
+/**
+ * Handle a shared-history query written by the container's nanoclaw MCP
+ * tool (list_conversations / get_messages / search_messages). Returns
+ * the response body the caller will serialize back into the result dir.
+ *
+ * Permission model: non-main groups see only their own chat_jid. Main
+ * groups see everything. Caller identity comes from the IPC namespace
+ * (the per-group directory the query was written into), which is
+ * tamper-proof because each container is mounted with its own namespace
+ * only.
+ */
+function handleHistoryQuery(
+  data: { type?: string } & Record<string, unknown>,
+  ctx: { isMain: boolean; callerJid: string | undefined },
+): Record<string, unknown> {
+  const ownOnly = !ctx.isMain;
+  const ownJid = ctx.callerJid;
+
+  if (data.type === 'list-conversations') {
+    const all = listConversations();
+    return {
+      type: 'list-conversations',
+      conversations: ownOnly
+        ? all.filter((c) => c.chatJid === ownJid)
+        : all,
+    };
+  }
+
+  if (data.type === 'get-messages') {
+    let chatJid = typeof data.chatJid === 'string' ? data.chatJid : undefined;
+    if (ownOnly) {
+      if (!ownJid) return { type: 'get-messages', messages: [], error: 'unregistered caller' };
+      chatJid = ownJid;
+    }
+    if (!chatJid) {
+      return { type: 'get-messages', messages: [], error: 'chatJid required' };
+    }
+    const msgs = getMessagesForChat(chatJid, {
+      limit: typeof data.limit === 'number' ? data.limit : undefined,
+      since: typeof data.since === 'string' ? data.since : undefined,
+      until: typeof data.until === 'string' ? data.until : undefined,
+    });
+    return { type: 'get-messages', messages: msgs };
+  }
+
+  if (data.type === 'search-messages') {
+    const q = typeof data.query === 'string' ? data.query.trim() : '';
+    if (!q) {
+      return { type: 'search-messages', messages: [], error: 'query required' };
+    }
+    const chatJid = ownOnly
+      ? ownJid
+      : typeof data.chatJid === 'string'
+        ? data.chatJid
+        : undefined;
+    const channel =
+      typeof data.channel === 'string' && !ownOnly ? data.channel : undefined;
+    const msgs = searchMessages(q, {
+      chatJid,
+      channel,
+      limit: typeof data.limit === 'number' ? data.limit : undefined,
+    });
+    return { type: 'search-messages', messages: msgs };
+  }
+
+  return { error: `unknown query type: ${String(data.type)}` };
 }
 
 export async function processTaskIpc(
