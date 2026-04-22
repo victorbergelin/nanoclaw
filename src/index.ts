@@ -4,6 +4,7 @@ import path from 'path';
 import {
   ASSISTANT_NAME,
   CREDENTIAL_PROXY_PORT,
+  DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
   GROUPS_DIR,
@@ -27,6 +28,7 @@ import {
 import {
   cleanupOrphans,
   ensureContainerRuntimeRunning,
+  execInContainer,
   PROXY_BIND_HOST,
 } from './container-runtime.js';
 import {
@@ -286,6 +288,94 @@ async function handleReference(
       `No active agent session. Send a message first, then /reference "${arg}" again.`,
     );
   }
+}
+
+/**
+ * Handler for /ask <question>. Spawns a short-lived sidecar via
+ * `container exec` inside the group's running container so the user can
+ * get a fast, read-only answer while the main agent is deep in a long
+ * task. Shares the container's filesystem and auth; does not disturb
+ * the active query.
+ *
+ * Flow:
+ *   1. Find the active container name + folder (fail if no container)
+ *   2. Write question to <DATA_DIR>/ipc/<folder>/checkin/<id>.q.json
+ *   3. container exec <name> node /tmp/dist/checkin.js <id>
+ *   4. Poll for <id>.a.json on the host side; reply with answer or error
+ */
+async function handleAsk(
+  question: string,
+  chatJid: string,
+  reply: (text: string) => Promise<void> | undefined,
+): Promise<void> {
+  const info = queue.getActiveContainerInfo(chatJid);
+  if (!info) {
+    await reply('No active agent to ask. Send a message first.');
+    return;
+  }
+
+  const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const checkinDir = path.join(
+    DATA_DIR,
+    'ipc',
+    info.groupFolder,
+    'checkin',
+  );
+  fs.mkdirSync(checkinDir, { recursive: true });
+  const qPath = path.join(checkinDir, `${id}.q.json`);
+  const aPath = path.join(checkinDir, `${id}.a.json`);
+  const tmpPath = `${qPath}.tmp`;
+  fs.writeFileSync(tmpPath, JSON.stringify({ question, contextJid: chatJid }));
+  fs.renameSync(tmpPath, qPath);
+
+  try {
+    execInContainer(
+      info.containerName,
+      ['node', '/tmp/dist/checkin.js', id],
+      { timeoutMs: 120_000 },
+    );
+  } catch (err) {
+    await reply(
+      `Couldn't reach the sidecar: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return;
+  }
+
+  const start = Date.now();
+  const deadline = 110_000;
+  while (Date.now() - start < deadline) {
+    if (fs.existsSync(aPath)) {
+      try {
+        const body = JSON.parse(fs.readFileSync(aPath, 'utf-8')) as {
+          answer?: string;
+          error?: string;
+        };
+        try {
+          fs.unlinkSync(aPath);
+        } catch {
+          /* ignore */
+        }
+        try {
+          fs.unlinkSync(qPath);
+        } catch {
+          /* ignore */
+        }
+        if (body.error) {
+          await reply(`Sidecar error: ${body.error}`);
+          return;
+        }
+        await reply(body.answer || '(sidecar returned no text)');
+        return;
+      } catch (err) {
+        await reply(
+          `Sidecar answer was unreadable: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        return;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  await reply('Sidecar timed out after ~2 minutes — try again or /status.');
 }
 
 // Centralized outbound path — every source of agent text (message loop,
@@ -793,7 +883,7 @@ async function main(): Promise<void> {
       //   /reference <target> — pipe last 20 messages from another chat in
       //   /help              — list available commands
       const CONTROL_CMD_RE =
-        /^(?:@\S+\s+)?\/(stop|restart|interrupt|status|help|reference)(?:@\S+)?(?:\s+(.+?))?\s*$/i;
+        /^(?:@\S+\s+)?\/(stop|restart|interrupt|status|help|reference|ask)(?:@\S+)?(?:\s+(.+?))?\s*$/i;
       const ctrl = trimmed.match(CONTROL_CMD_RE);
       if (ctrl && registeredGroups[chatJid]) {
         const cmd = ctrl[1].toLowerCase();
@@ -812,6 +902,7 @@ async function main(): Promise<void> {
               `• /interrupt — abort the current task, keep session\n` +
               `• /status — snapshot of the running agent\n` +
               `• /reference <chat> — pipe last 20 messages from <chat> into the current session\n` +
+              `• /ask <question> — fast read-only sidecar answer while the main agent is busy\n` +
               `• /help — this message`,
           );
           return;
@@ -837,6 +928,20 @@ async function main(): Promise<void> {
           }
           handleReference(arg, chatJid, reply).catch((err) =>
             logger.error({ err, chatJid, arg }, '/reference handler failed'),
+          );
+          return;
+        }
+
+        if (cmd === 'ask') {
+          const question = ctrl[2]?.trim();
+          if (!question) {
+            reply(
+              'Usage: /ask <question> — answered by a read-only sidecar while the main agent keeps working.',
+            );
+            return;
+          }
+          handleAsk(question, chatJid, reply).catch((err) =>
+            logger.error({ err, chatJid }, '/ask handler failed'),
           );
           return;
         }

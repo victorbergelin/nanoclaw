@@ -2,10 +2,10 @@
  * Container runtime abstraction for NanoClaw.
  * All runtime-specific logic lives here so swapping runtimes means changing one file.
  */
-import { execSync } from 'child_process';
-import fs from 'fs';
+import { execSync, spawn } from 'child_process';
 import os from 'os';
 
+import { readEnvFile } from './env.js';
 import { logger } from './logger.js';
 
 /** The container runtime binary name. */
@@ -37,40 +37,13 @@ function detectHostGateway(): string {
  * but the proxy must start before any container.
  * The /convert-to-apple-container skill sets this during setup.
  */
-export const PROXY_BIND_HOST = process.env.CREDENTIAL_PROXY_HOST;
+export const PROXY_BIND_HOST =
+  process.env.CREDENTIAL_PROXY_HOST ||
+  readEnvFile(['CREDENTIAL_PROXY_HOST']).CREDENTIAL_PROXY_HOST;
 if (!PROXY_BIND_HOST) {
   throw new Error(
     'CREDENTIAL_PROXY_HOST is not set in .env. Run /convert-to-apple-container to configure.',
   );
-}
-
-/** Hostname containers use to reach the host machine. */
-export const CONTAINER_HOST_GATEWAY = 'host.docker.internal';
-
-/**
- * Address the credential proxy binds to.
- * Docker Desktop (macOS): 127.0.0.1 — the VM routes host.docker.internal to loopback.
- * Docker (Linux): bind to the docker0 bridge IP so only containers can reach it,
- *   falling back to 0.0.0.0 if the interface isn't found.
- */
-export const PROXY_BIND_HOST =
-  process.env.CREDENTIAL_PROXY_HOST || detectProxyBindHost();
-
-function detectProxyBindHost(): string {
-  if (os.platform() === 'darwin') return '127.0.0.1';
-
-  // WSL uses Docker Desktop (same VM routing as macOS) — loopback is correct.
-  // Check /proc filesystem, not env vars — WSL_DISTRO_NAME isn't set under systemd.
-  if (fs.existsSync('/proc/sys/fs/binfmt_misc/WSLInterop')) return '127.0.0.1';
-
-  // Bare-metal Linux: bind to the docker0 bridge IP instead of 0.0.0.0
-  const ifaces = os.networkInterfaces();
-  const docker0 = ifaces['docker0'];
-  if (docker0) {
-    const ipv4 = docker0.find((a) => a.family === 'IPv4');
-    if (ipv4) return ipv4.address;
-  }
-  return '0.0.0.0';
 }
 
 /** CLI args needed for the container to resolve the host gateway. */
@@ -99,6 +72,52 @@ export function stopContainer(name: string): void {
     throw new Error(`Invalid container name: ${name}`);
   }
   execSync(`${CONTAINER_RUNTIME_BIN} stop ${name}`, { stdio: 'pipe' });
+}
+
+/**
+ * Run a fire-and-forget command inside an already-running container via
+ * `container exec`. Used by the /ask sidecar so the host can spawn a
+ * second node process without having to spawn a fresh container. Rejects
+ * obvious shell metacharacters in the container name; callers are
+ * responsible for validating the rest of the argv.
+ */
+export function execInContainer(
+  name: string,
+  args: string[],
+  opts: { timeoutMs?: number } = {},
+): void {
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(name)) {
+    throw new Error(`Invalid container name: ${name}`);
+  }
+  // execSync captures stdio into buffers; we don't care about stdout here —
+  // the sidecar writes its answer to a shared file that the host polls.
+  // Detach-style: start and return; caller polls the answer file.
+  const proc = spawn(CONTAINER_RUNTIME_BIN, ['exec', name, ...args], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+    detached: false,
+  });
+  proc.stdout?.on('data', () => {});
+  proc.stderr?.on('data', (chunk: Buffer) => {
+    logger.debug(
+      { container: name, stderr: chunk.toString().slice(0, 500) },
+      'execInContainer stderr',
+    );
+  });
+  if (opts.timeoutMs) {
+    setTimeout(() => {
+      if (proc.exitCode === null) {
+        logger.warn(
+          { container: name, timeoutMs: opts.timeoutMs },
+          'execInContainer timeout — killing child',
+        );
+        try {
+          proc.kill('SIGKILL');
+        } catch {
+          /* ignore */
+        }
+      }
+    }, opts.timeoutMs).unref();
+  }
 }
 
 /** Ensure the container runtime is running, starting it if needed. */

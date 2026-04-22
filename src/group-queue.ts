@@ -183,6 +183,22 @@ export class GroupQueue {
   }
 
   /**
+   * Return the active container's name and group folder, if any. Used by
+   * /ask to figure out which running container to exec the sidecar in.
+   */
+  getActiveContainerInfo(
+    groupJid: string,
+  ): { containerName: string; groupFolder: string } | null {
+    const state = this.groups.get(groupJid);
+    if (!state || !state.active) return null;
+    if (!state.containerName || !state.groupFolder) return null;
+    return {
+      containerName: state.containerName,
+      groupFolder: state.groupFolder,
+    };
+  }
+
+  /**
    * Stop the active container for a group, if any. Invoked by user
    * commands (/stop, /restart). The registered child process exits on
    * its own once the container runtime tears down the VM, which releases
