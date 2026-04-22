@@ -9,6 +9,10 @@ export interface ChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /** Optional: register a new group at runtime. Used by Discord's
+   *  per-channel auto-split — each Discord channel becomes its own
+   *  group on first message inside a registered guild. */
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
 }
 
 export type ChannelFactory = (opts: ChannelOpts) => Channel | null;

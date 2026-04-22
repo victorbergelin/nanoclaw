@@ -27,6 +27,36 @@ export interface DiscordChannelOpts {
   onMessage: OnInboundMessage;
   onChatMetadata: OnChatMetadata;
   registeredGroups: () => Record<string, RegisteredGroup>;
+  /** Optional. When provided, this Discord channel will auto-register
+   *  each concrete channel as its own group the first time it sees a
+   *  message inside a guild that has an existing `dc:guild:<id>`
+   *  registration. Folder names are slugified from the guild/channel
+   *  pair and guaranteed unique. */
+  registerGroup?: (jid: string, group: RegisteredGroup) => void;
+}
+
+/** Slugify a human-readable name into a folder-safe slug. Empty output
+ *  is rejected by callers. */
+function slugifyFolder(raw: string): string {
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
+
+/** Ensure a folder name is unique among the given groups by appending
+ *  a short suffix derived from `seedId` if the base is taken. */
+function uniqueFolder(
+  base: string,
+  seedId: string,
+  existing: Record<string, RegisteredGroup>,
+): string {
+  const taken = new Set(Object.values(existing).map((g) => g.folder));
+  if (base && !taken.has(base)) return base;
+  const suffix = seedId.slice(-6);
+  const candidate = base ? `${base}-${suffix}` : `dc-${suffix}`;
+  return taken.has(candidate) ? `${candidate}-${Date.now().toString(36)}` : candidate;
 }
 
 export class DiscordChannel implements Channel {
@@ -166,31 +196,49 @@ export class DiscordChannel implements Channel {
         isGroup,
       );
 
-      // Only deliver full message for registered groups.
-      // Fallback: if the specific channel isn't registered, check for a
-      // guild-level registration (dc:guild:<guildId>) — lets the bot respond
-      // in every channel of a server with a single registration. We also
-      // remember the last-active channel per guild so outbound replies land
-      // in the correct channel.
+      // Only deliver full message for registered groups. Each Discord
+      // channel is treated as its own group — if this one isn't
+      // registered yet but its guild is, auto-register the channel with
+      // settings inherited from the guild so each #channel gets its own
+      // container/session and can run in parallel with its siblings.
       const groups = this.opts.registeredGroups();
       let group = groups[chatJid];
-      let effectiveJid = chatJid;
+      const effectiveJid = chatJid;
+
       if (!group && message.guild) {
         const guildJid = `dc:guild:${message.guild.id}`;
-        if (groups[guildJid]) {
-          group = groups[guildJid];
-          effectiveJid = guildJid;
-          this.guildLastChannel.set(message.guild.id, channelId);
-          // Ensure the guild JID has a chats row so FK constraints succeed.
-          this.opts.onChatMetadata(
-            effectiveJid,
-            timestamp,
-            message.guild.name,
-            'discord',
-            true,
+        const guildGroup = groups[guildJid];
+        if (guildGroup && this.opts.registerGroup) {
+          const textChannel = message.channel as TextChannel;
+          const base = slugifyFolder(
+            `${message.guild.name}-${textChannel.name}`,
           );
+          const folder = uniqueFolder(base, channelId, groups);
+          const newGroup: RegisteredGroup = {
+            name: chatName,
+            folder,
+            trigger: guildGroup.trigger,
+            added_at: new Date().toISOString(),
+            requiresTrigger: guildGroup.requiresTrigger,
+            isMain: guildGroup.isMain,
+            containerConfig: guildGroup.containerConfig,
+          };
+          try {
+            this.opts.registerGroup(chatJid, newGroup);
+            group = newGroup;
+            logger.info(
+              { chatJid, folder, guildJid },
+              'Auto-registered Discord channel as its own group',
+            );
+          } catch (err) {
+            logger.error(
+              { chatJid, folder, err },
+              'Auto-register Discord channel failed',
+            );
+          }
         }
       }
+
       if (!group) {
         logger.debug(
           { chatJid, chatName },

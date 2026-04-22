@@ -236,8 +236,7 @@ function formatReferenceBlock(
     .slice()
     .reverse()
     .map(
-      (m) =>
-        `[${m.timestamp}] ${m.sender_name || '(unknown)'}: ${m.content}`,
+      (m) => `[${m.timestamp}] ${m.sender_name || '(unknown)'}: ${m.content}`,
     );
   return (
     `--- Referenced context from "${target.name}" (${target.channel}, ${target.jid}) ---\n` +
@@ -927,6 +926,8 @@ async function main(): Promise<void> {
       isGroup?: boolean,
     ) => storeChatMetadata(chatJid, timestamp, name, channel, isGroup),
     registeredGroups: () => registeredGroups,
+    registerGroup: (jid: string, group: RegisteredGroup) =>
+      registerGroup(jid, group),
   };
 
   // Create and connect all registered channels.
