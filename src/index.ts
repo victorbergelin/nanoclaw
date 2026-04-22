@@ -36,10 +36,12 @@ import {
   deleteSession,
   getAllTasks,
   getLastBotMessageTimestamp,
+  getMessagesForChat,
   getMessagesSince,
   getNewMessages,
   getRouterState,
   initDatabase,
+  listConversations,
   setRegisteredGroup,
   setRouterState,
   setSession,
@@ -193,6 +195,98 @@ export function _setRegisteredGroups(
   groups: Record<string, RegisteredGroup>,
 ): void {
   registeredGroups = groups;
+}
+
+/**
+ * Resolve a /reference argument to a specific chat. Accepts:
+ *   - a full JID (dc:..., tg:..., wa:...) — matched exactly
+ *   - a substring of the chat name — case-insensitive, first match wins
+ * Returns null if nothing matches.
+ */
+function resolveReferenceTarget(
+  arg: string,
+): { jid: string; name: string; channel: string } | null {
+  const all = listConversations();
+  const exact = all.find((c) => c.chatJid === arg);
+  if (exact) {
+    return { jid: exact.chatJid, name: exact.name, channel: exact.channel };
+  }
+  const q = arg.toLowerCase();
+  const nameMatch = all.find((c) => c.name?.toLowerCase().includes(q));
+  if (nameMatch) {
+    return {
+      jid: nameMatch.chatJid,
+      name: nameMatch.name,
+      channel: nameMatch.channel,
+    };
+  }
+  return null;
+}
+
+/**
+ * Render a list of messages as a compact context block the agent can
+ * reason about. Ordered oldest→newest (getMessagesForChat returns newest-
+ * first, so we reverse here).
+ */
+function formatReferenceBlock(
+  target: { name: string; channel: string; jid: string },
+  messages: { sender_name?: string; content: string; timestamp: string }[],
+): string {
+  const lines = messages
+    .slice()
+    .reverse()
+    .map(
+      (m) =>
+        `[${m.timestamp}] ${m.sender_name || '(unknown)'}: ${m.content}`,
+    );
+  return (
+    `--- Referenced context from "${target.name}" (${target.channel}, ${target.jid}) ---\n` +
+    lines.join('\n') +
+    `\n--- End reference ---`
+  );
+}
+
+/**
+ * Handler for the /reference <target> user command. Resolves the target,
+ * fetches its recent messages, and pipes them into the currently-active
+ * agent container via IPC. Non-main groups are restricted to referencing
+ * their own chat (same rule as the MCP search/get tools).
+ */
+async function handleReference(
+  arg: string,
+  chatJid: string,
+  reply: (text: string) => Promise<void> | undefined,
+): Promise<void> {
+  const target = resolveReferenceTarget(arg);
+  if (!target) {
+    await reply(
+      `No chat matching "${arg}". Try /reference with no argument to list options.`,
+    );
+    return;
+  }
+  const requester = registeredGroups[chatJid];
+  if (!requester?.isMain && target.jid !== chatJid) {
+    await reply(
+      '/reference to another chat requires the main group. You can reference your own chat.',
+    );
+    return;
+  }
+  const messages = getMessagesForChat(target.jid, { limit: 20 });
+  if (messages.length === 0) {
+    await reply(`No messages found in "${target.name}".`);
+    return;
+  }
+  const block = formatReferenceBlock(target, messages);
+  const piped = queue.sendMessage(chatJid, block);
+  if (piped) {
+    await reply(
+      `📎 Referenced ${messages.length} messages from "${target.name}" — now in context for the running agent.`,
+    );
+  } else {
+    await reply(
+      `No active agent session. Send a message first, then /reference "${arg}" again.`,
+    );
+  }
 }
 
 // Centralized outbound path — every source of agent text (message loop,
@@ -694,12 +788,13 @@ async function main(): Promise<void> {
 
       // Container control commands. Accepts bare "/stop" or variants like
       // "@Bottis /stop" or "/stop@botname" (Telegram group style).
-      //   /stop, /restart  — nuclear: kill the container outright
-      //   /interrupt       — soft: abort the in-flight query, keep session
-      //   /status          — ask the agent for a snapshot
-      //   /help            — list available commands
+      //   /stop, /restart    — nuclear: kill the container outright
+      //   /interrupt         — soft: abort the in-flight query, keep session
+      //   /status            — ask the agent for a snapshot
+      //   /reference <target> — pipe last 20 messages from another chat in
+      //   /help              — list available commands
       const CONTROL_CMD_RE =
-        /^(?:@\S+\s+)?\/(stop|restart|interrupt|status|help)(?:@\S+)?\s*$/i;
+        /^(?:@\S+\s+)?\/(stop|restart|interrupt|status|help|reference)(?:@\S+)?(?:\s+(.+?))?\s*$/i;
       const ctrl = trimmed.match(CONTROL_CMD_RE);
       if (ctrl && registeredGroups[chatJid]) {
         const cmd = ctrl[1].toLowerCase();
@@ -717,7 +812,32 @@ async function main(): Promise<void> {
               `• /stop, /restart — kill the agent container\n` +
               `• /interrupt — abort the current task, keep session\n` +
               `• /status — snapshot of the running agent\n` +
+              `• /reference <chat> — pipe last 20 messages from <chat> into the current session\n` +
               `• /help — this message`,
+          );
+          return;
+        }
+
+        if (cmd === 'reference') {
+          const arg = ctrl[2]?.trim();
+          if (!arg) {
+            const isMain = registeredGroups[chatJid]?.isMain;
+            if (!isMain) {
+              reply('Usage: /reference <chat-name or jid>.');
+            } else {
+              const chats = listConversations().slice(0, 10);
+              const lines = chats.map(
+                (c) =>
+                  `• ${c.name} (${c.channel}) — ${c.messageCount} msgs — ${c.chatJid}`,
+              );
+              reply(
+                `Usage: /reference <chat-name or jid>\n\nRecent conversations:\n${lines.join('\n')}`,
+              );
+            }
+            return;
+          }
+          handleReference(arg, chatJid, reply).catch((err) =>
+            logger.error({ err, chatJid, arg }, '/reference handler failed'),
           );
           return;
         }
