@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 
 import {
+  AttachmentBuilder,
   Client,
   Events,
   GatewayIntentBits,
@@ -351,6 +352,82 @@ export class DiscordChannel implements Channel {
       );
     } catch (err) {
       logger.error({ jid, err }, 'Failed to send Discord message');
+    }
+  }
+
+  // Discord's per-message upload cap is 25 MB on non-boosted guilds.
+  private static readonly MAX_FILE_BYTES = 25 * 1024 * 1024;
+  private static readonly MAX_FILES_PER_MESSAGE = 10;
+
+  async sendFiles(
+    jid: string,
+    text: string,
+    filePaths: string[],
+  ): Promise<void> {
+    if (!this.client) {
+      logger.warn('Discord client not initialized');
+      return;
+    }
+    try {
+      const channelId = await this.resolveChannelId(jid);
+      if (!channelId) {
+        logger.warn({ jid }, 'Guild has no last-active or system channel');
+        return;
+      }
+      const channel = await this.client.channels.fetch(channelId);
+      if (!channel || !('send' in channel)) {
+        logger.warn({ jid }, 'Discord channel not found or not text-based');
+        return;
+      }
+      const textChannel = channel as TextChannel;
+
+      const valid: AttachmentBuilder[] = [];
+      const skipped: string[] = [];
+      for (const p of filePaths) {
+        try {
+          const st = fs.statSync(p);
+          if (!st.isFile()) {
+            skipped.push(`${path.basename(p)} (not a file)`);
+            continue;
+          }
+          if (st.size > DiscordChannel.MAX_FILE_BYTES) {
+            skipped.push(`${path.basename(p)} (exceeds 25MB)`);
+            continue;
+          }
+          valid.push(new AttachmentBuilder(p, { name: path.basename(p) }));
+        } catch (err) {
+          logger.warn({ p, err }, 'Discord attachment not readable');
+          skipped.push(`${path.basename(p)} (unreadable)`);
+        }
+      }
+
+      const suffix = skipped.length ? `\n_Skipped: ${skipped.join(', ')}_` : '';
+      let caption = (text || '') + suffix;
+
+      if (valid.length === 0) {
+        if (caption.trim()) await textChannel.send(caption.slice(0, 2000));
+        return;
+      }
+
+      // Discord allows up to 10 files per message; chunk if more.
+      for (
+        let i = 0;
+        i < valid.length;
+        i += DiscordChannel.MAX_FILES_PER_MESSAGE
+      ) {
+        const batch = valid.slice(i, i + DiscordChannel.MAX_FILES_PER_MESSAGE);
+        const batchCaption = i === 0 ? caption : '';
+        await textChannel.send({
+          content: batchCaption ? batchCaption.slice(0, 2000) : undefined,
+          files: batch,
+        });
+      }
+      logger.info(
+        { jid, channelId, fileCount: valid.length, skipped: skipped.length },
+        'Discord files sent',
+      );
+    } catch (err) {
+      logger.error({ jid, err }, 'Failed to send Discord files');
     }
   }
 

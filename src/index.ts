@@ -49,7 +49,12 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
-import { findChannel, formatMessages, formatOutbound } from './router.js';
+import {
+  extractAttachments,
+  findChannel,
+  formatMessages,
+  formatOutbound,
+} from './router.js';
 import {
   restoreRemoteControl,
   startRemoteControl,
@@ -190,6 +195,72 @@ export function _setRegisteredGroups(
   registeredGroups = groups;
 }
 
+// Centralized outbound path — every source of agent text (message loop,
+// MCP send_message via IPC, scheduler results) funnels through this so
+// <internal> stripping and <attach> extraction happen in exactly one place.
+async function sendAgentOutput(
+  channel: Channel,
+  chatJid: string,
+  rawText: string,
+): Promise<boolean> {
+  const stripped = formatOutbound(rawText);
+  if (!stripped) return false;
+  const { text, paths } = extractAttachments(stripped);
+  const group = registeredGroups[chatJid];
+  if (paths.length > 0 && channel.sendFiles && group) {
+    const hostPaths = resolveAttachmentPaths(paths, group.folder);
+    await channel.sendFiles(chatJid, text, hostPaths);
+    return true;
+  }
+  if (paths.length > 0) {
+    logger.warn(
+      { channel: channel.name, paths, hasGroup: !!group },
+      'Attachments requested but channel lacks sendFiles or group is unknown; sending text only',
+    );
+  }
+  if (text) {
+    await channel.sendMessage(chatJid, text);
+    return true;
+  }
+  return false;
+}
+
+// Resolve attach-tag paths to absolute host paths under the group folder.
+// Accepts three forms from the agent:
+//   /workspace/group/...        → <groupFolder>/...
+//   /workspace/extra/<name>/... → rejected (read-only mounts, out of scope here)
+//   relative paths (attachments/foo.png) → <groupFolder>/attachments/foo.png
+// Paths that escape the group folder are dropped with a warning.
+function resolveAttachmentPaths(
+  paths: string[],
+  groupFolder: string,
+): string[] {
+  const base = resolveGroupFolderPath(groupFolder);
+  const resolved: string[] = [];
+  for (const raw of paths) {
+    let rel: string;
+    if (raw.startsWith('/workspace/group/')) {
+      rel = raw.slice('/workspace/group/'.length);
+    } else if (raw.startsWith('/workspace/')) {
+      logger.warn({ raw }, 'Attachment outside group workspace, skipping');
+      continue;
+    } else if (path.isAbsolute(raw)) {
+      logger.warn({ raw }, 'Absolute host paths not allowed in attach, skipping');
+      continue;
+    } else {
+      rel = raw;
+    }
+    const abs = path.resolve(base, rel);
+    const relToBase = path.relative(base, abs);
+    if (relToBase.startsWith('..') || path.isAbsolute(relToBase)) {
+      logger.warn({ raw }, 'Attachment path escapes group folder, skipping');
+      continue;
+    }
+    resolved.push(abs);
+  }
+  return resolved;
+}
+
 /**
  * Process all pending messages for a group.
  * Called by the GroupQueue when it's this group's turn.
@@ -266,13 +337,9 @@ async function processGroupMessages(chatJid: string): Promise<boolean> {
         typeof result.result === 'string'
           ? result.result
           : JSON.stringify(result.result);
-      // Strip <internal>...</internal> blocks — agent uses these for internal reasoning
-      const text = raw.replace(/<internal>[\s\S]*?<\/internal>/g, '').trim();
       logger.info({ group: group.name }, `Agent output: ${raw.length} chars`);
-      if (text) {
-        await channel.sendMessage(chatJid, text);
-        outputSentToUser = true;
-      }
+      const sent = await sendAgentOutput(channel, chatJid, raw);
+      if (sent) outputSentToUser = true;
       // Only reset idle timer on actual results, not session-update markers (result: null)
       resetIdleTimer();
     }
@@ -773,15 +840,14 @@ async function main(): Promise<void> {
         logger.warn({ jid }, 'No channel owns JID, cannot send message');
         return;
       }
-      const text = formatOutbound(rawText);
-      if (text) await channel.sendMessage(jid, text);
+      await sendAgentOutput(channel, jid, rawText);
     },
   });
   startIpcWatcher({
-    sendMessage: (jid, text) => {
+    sendMessage: async (jid, rawText) => {
       const channel = findChannel(channels, jid);
       if (!channel) throw new Error(`No channel for JID: ${jid}`);
-      return channel.sendMessage(jid, text);
+      await sendAgentOutput(channel, jid, rawText);
     },
     registeredGroups: () => registeredGroups,
     registerGroup,

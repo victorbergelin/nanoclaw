@@ -41,6 +41,25 @@ export function formatOutbound(rawText: string): string {
   return text;
 }
 
+// Agent emits <attach path="..."/> (self-closing or with a caption between tags)
+// to request that a file be sent alongside its reply. Paths are relative to the
+// group folder or absolute under /workspace/group/. extractAttachments returns
+// the text with attach tags removed and the raw path list for resolution.
+export function extractAttachments(text: string): {
+  text: string;
+  paths: string[];
+} {
+  const paths: string[] = [];
+  const attachRe =
+    /<attach\s+path=(?:"([^"]+)"|'([^']+)')\s*\/?>(?:\s*<\/attach>)?/g;
+  const cleaned = text.replace(attachRe, (_m, dq, sq) => {
+    const p = (dq || sq || '').trim();
+    if (p) paths.push(p);
+    return '';
+  });
+  return { text: cleaned.replace(/\n{3,}/g, '\n\n').trim(), paths };
+}
+
 export function routeOutbound(
   channels: Channel[],
   jid: string,
