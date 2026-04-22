@@ -135,10 +135,7 @@ export class GroupQueue {
    * its next poll. Used by /interrupt and /status; returns false if the
    * group has no active container to receive the event.
    */
-  writeIpcEvent(
-    groupJid: string,
-    event: Record<string, unknown>,
-  ): boolean {
+  writeIpcEvent(groupJid: string, event: Record<string, unknown>): boolean {
     const state = this.groups.get(groupJid);
     if (!state || !state.active || !state.groupFolder) return false;
     const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
