@@ -245,7 +245,10 @@ function resolveAttachmentPaths(
       logger.warn({ raw }, 'Attachment outside group workspace, skipping');
       continue;
     } else if (path.isAbsolute(raw)) {
-      logger.warn({ raw }, 'Absolute host paths not allowed in attach, skipping');
+      logger.warn(
+        { raw },
+        'Absolute host paths not allowed in attach, skipping',
+      );
       continue;
     } else {
       rel = raw;
