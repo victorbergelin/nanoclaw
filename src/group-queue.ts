@@ -131,6 +131,61 @@ export class GroupQueue {
   }
 
   /**
+   * Write a typed IPC event the container's agent-runner will pick up on
+   * its next poll. Used by /interrupt and /status; returns false if the
+   * group has no active container to receive the event.
+   */
+  writeIpcEvent(
+    groupJid: string,
+    event: Record<string, unknown>,
+  ): boolean {
+    const state = this.groups.get(groupJid);
+    if (!state || !state.active || !state.groupFolder) return false;
+    const inputDir = path.join(DATA_DIR, 'ipc', state.groupFolder, 'input');
+    try {
+      fs.mkdirSync(inputDir, { recursive: true });
+      const filename = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}.json`;
+      const filepath = path.join(inputDir, filename);
+      const tempPath = `${filepath}.tmp`;
+      fs.writeFileSync(tempPath, JSON.stringify(event));
+      fs.renameSync(tempPath, filepath);
+      return true;
+    } catch (err) {
+      logger.error({ groupJid, err }, 'writeIpcEvent failed');
+      return false;
+    }
+  }
+
+  /**
+   * Read (and consume) a status snapshot the container wrote to
+   * ipc/<folder>/output/status.<id>.json. Returns null if not yet
+   * present; caller is expected to poll a few times with a short delay.
+   */
+  readStatusSnapshot(
+    groupJid: string,
+    id: string,
+  ): Record<string, unknown> | null {
+    const state = this.groups.get(groupJid);
+    if (!state || !state.groupFolder) return null;
+    const outputPath = path.join(
+      DATA_DIR,
+      'ipc',
+      state.groupFolder,
+      'output',
+      `status.${id}.json`,
+    );
+    if (!fs.existsSync(outputPath)) return null;
+    try {
+      const json = JSON.parse(fs.readFileSync(outputPath, 'utf-8'));
+      fs.unlinkSync(outputPath);
+      return json;
+    } catch (err) {
+      logger.error({ groupJid, id, err }, 'readStatusSnapshot failed');
+      return null;
+    }
+  }
+
+  /**
    * Stop the active container for a group, if any. Invoked by user
    * commands (/stop, /restart). The registered child process exits on
    * its own once the container runtime tears down the VM, which releases

@@ -622,23 +622,92 @@ async function main(): Promise<void> {
         return;
       }
 
-      // Container control commands — stop or restart the agent container
-      // for this group. Accepts a bare "/stop" / "/restart" and variants
-      // like "@Bottis /stop" or "/stop@botname" (Telegram group style).
-      const CONTROL_CMD_RE = /^(?:@\S+\s+)?\/(stop|restart)(?:@\S+)?\s*$/i;
+      // Container control commands. Accepts bare "/stop" or variants like
+      // "@Bottis /stop" or "/stop@botname" (Telegram group style).
+      //   /stop, /restart  — nuclear: kill the container outright
+      //   /interrupt       — soft: abort the in-flight query, keep session
+      //   /status          — ask the agent for a snapshot
+      //   /help            — list available commands
+      const CONTROL_CMD_RE =
+        /^(?:@\S+\s+)?\/(stop|restart|interrupt|status|help)(?:@\S+)?\s*$/i;
       const ctrl = trimmed.match(CONTROL_CMD_RE);
       if (ctrl && registeredGroups[chatJid]) {
         const cmd = ctrl[1].toLowerCase();
         const channel = findChannel(channels, chatJid);
-        const stopped = queue.stopActiveContainer(chatJid);
-        const reply = stopped
-          ? `🛑 Agent ${cmd === 'stop' ? 'stopped' : 'restarted'}. Send a new message to start again.`
-          : `No active agent to ${cmd}.`;
-        channel
-          ?.sendMessage(chatJid, reply)
-          .catch((err) =>
-            logger.error({ err, chatJid }, 'Control command reply failed'),
+        const reply = (text: string) =>
+          channel
+            ?.sendMessage(chatJid, text)
+            .catch((err) =>
+              logger.error({ err, chatJid }, 'Control command reply failed'),
+            );
+
+        if (cmd === 'help') {
+          reply(
+            `Commands:\n` +
+              `• /stop, /restart — kill the agent container\n` +
+              `• /interrupt — abort the current task, keep session\n` +
+              `• /status — snapshot of the running agent\n` +
+              `• /help — this message`,
           );
+          return;
+        }
+
+        if (cmd === 'interrupt') {
+          const sent = queue.writeIpcEvent(chatJid, { type: 'interrupt' });
+          reply(
+            sent
+              ? '✋ Interrupt sent. The agent will stop after the current step.'
+              : 'No active agent to interrupt.',
+          );
+          return;
+        }
+
+        if (cmd === 'status') {
+          const id = `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+          const sent = queue.writeIpcEvent(chatJid, {
+            type: 'status-request',
+            id,
+          });
+          if (!sent) {
+            reply('No active agent.');
+            return;
+          }
+          // Poll for the snapshot for up to 3 seconds.
+          const start = Date.now();
+          const tick = () => {
+            const snap = queue.readStatusSnapshot(chatJid, id);
+            if (snap) {
+              const msgs = snap.messageCount ?? '?';
+              const elapsedMs = Number(snap.elapsedMs) || 0;
+              const elapsedSec = Math.floor(elapsedMs / 1000);
+              const session =
+                typeof snap.sessionId === 'string'
+                  ? ` (session ${snap.sessionId.slice(0, 8)})`
+                  : '';
+              reply(
+                `📊 Agent alive${session} — ${msgs} internal messages, running ${elapsedSec}s`,
+              );
+              return;
+            }
+            if (Date.now() - start > 3000) {
+              reply(
+                '📊 Status request sent; no reply within 3s. Agent may be deep in a tool call.',
+              );
+              return;
+            }
+            setTimeout(tick, 250);
+          };
+          setTimeout(tick, 250);
+          return;
+        }
+
+        // /stop and /restart — nuclear path (unchanged semantics)
+        const stopped = queue.stopActiveContainer(chatJid);
+        reply(
+          stopped
+            ? `🛑 Agent ${cmd === 'stop' ? 'stopped' : 'restarted'}. Send a new message to start again.`
+            : `No active agent to ${cmd}.`,
+        );
         return;
       }
 

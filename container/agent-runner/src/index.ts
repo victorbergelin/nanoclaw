@@ -62,7 +62,14 @@ interface SDKUserMessage {
 
 const IPC_INPUT_DIR = '/workspace/ipc/input';
 const IPC_INPUT_CLOSE_SENTINEL = path.join(IPC_INPUT_DIR, '_close');
+const IPC_OUTPUT_DIR = '/workspace/ipc/output';
 const IPC_POLL_MS = 500;
+
+/** Events written by the host into /workspace/ipc/input/*.json. */
+type IpcEvent =
+  | { kind: 'message'; text: string }
+  | { kind: 'interrupt' }
+  | { kind: 'status-request'; id: string };
 
 /**
  * Push-based async iterable for streaming user messages to the SDK.
@@ -305,10 +312,11 @@ function shouldClose(): boolean {
 }
 
 /**
- * Drain all pending IPC input messages.
- * Returns messages found, or empty array.
+ * Drain all pending IPC input events. Returns typed events the caller
+ * can dispatch on. Unknown event types are logged and discarded so a
+ * bad host entry never wedges the container.
  */
-function drainIpcInput(): string[] {
+function drainIpcInput(): IpcEvent[] {
   try {
     fs.mkdirSync(IPC_INPUT_DIR, { recursive: true });
     const files = fs
@@ -316,14 +324,23 @@ function drainIpcInput(): string[] {
       .filter((f) => f.endsWith('.json'))
       .sort();
 
-    const messages: string[] = [];
+    const events: IpcEvent[] = [];
     for (const file of files) {
       const filePath = path.join(IPC_INPUT_DIR, file);
       try {
         const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
         fs.unlinkSync(filePath);
-        if (data.type === 'message' && data.text) {
-          messages.push(data.text);
+        if (data.type === 'message' && typeof data.text === 'string') {
+          events.push({ kind: 'message', text: data.text });
+        } else if (data.type === 'interrupt') {
+          events.push({ kind: 'interrupt' });
+        } else if (
+          data.type === 'status-request' &&
+          typeof data.id === 'string'
+        ) {
+          events.push({ kind: 'status-request', id: data.id });
+        } else {
+          log(`Unknown IPC event type: ${String(data.type)}`);
         }
       } catch (err) {
         log(
@@ -336,10 +353,28 @@ function drainIpcInput(): string[] {
         }
       }
     }
-    return messages;
+    return events;
   } catch (err) {
     log(`IPC drain error: ${err instanceof Error ? err.message : String(err)}`);
     return [];
+  }
+}
+
+/**
+ * Write a status snapshot the host is waiting on to read.
+ * Uses tmp+rename for atomic visibility to the host poller.
+ */
+function writeStatusSnapshot(id: string, snapshot: Record<string, unknown>) {
+  try {
+    fs.mkdirSync(IPC_OUTPUT_DIR, { recursive: true });
+    const destPath = path.join(IPC_OUTPUT_DIR, `status.${id}.json`);
+    const tempPath = `${destPath}.tmp`;
+    fs.writeFileSync(tempPath, JSON.stringify(snapshot));
+    fs.renameSync(tempPath, destPath);
+  } catch (err) {
+    log(
+      `Failed to write status snapshot: ${err instanceof Error ? err.message : String(err)}`,
+    );
   }
 }
 
@@ -382,13 +417,23 @@ async function runQuery(
   newSessionId?: string;
   lastAssistantUuid?: string;
   closedDuringQuery: boolean;
+  interrupted: boolean;
 }> {
   const stream = new MessageStream();
   stream.push(prompt);
 
-  // Poll IPC for follow-up messages and _close sentinel during the query
+  // AbortController lets /interrupt cancel the in-flight SDK query without
+  // killing the container. SDK version 0.2.92 accepts it in options.
+  const abortController = new AbortController();
+  const queryStartedAt = Date.now();
+
+  // Poll IPC for follow-up messages, interrupt, status-request, and _close
   let ipcPolling = true;
   let closedDuringQuery = false;
+  let interrupted = false;
+  let messageCount = 0;
+  let lastSessionId: string | undefined;
+
   const pollIpcDuringQuery = () => {
     if (!ipcPolling) return;
     if (shouldClose()) {
@@ -398,10 +443,27 @@ async function runQuery(
       ipcPolling = false;
       return;
     }
-    const messages = drainIpcInput();
-    for (const text of messages) {
-      log(`Piping IPC message into active query (${text.length} chars)`);
-      stream.push(text);
+    const events = drainIpcInput();
+    for (const ev of events) {
+      if (ev.kind === 'message') {
+        log(`Piping IPC message into active query (${ev.text.length} chars)`);
+        stream.push(ev.text);
+      } else if (ev.kind === 'interrupt') {
+        log('Interrupt IPC event — aborting active query');
+        interrupted = true;
+        abortController.abort();
+        // Don't end the stream outright — the for-await loop will exit on
+        // abort and the outer loop decides whether to start a fresh query.
+      } else if (ev.kind === 'status-request') {
+        log(`Status-request IPC event (id=${ev.id})`);
+        writeStatusSnapshot(ev.id, {
+          id: ev.id,
+          sessionId: lastSessionId,
+          elapsedMs: Date.now() - queryStartedAt,
+          messageCount,
+          alive: true,
+        });
+      }
     }
     setTimeout(pollIpcDuringQuery, IPC_POLL_MS);
   };
@@ -409,7 +471,6 @@ async function runQuery(
 
   let newSessionId: string | undefined;
   let lastAssistantUuid: string | undefined;
-  let messageCount = 0;
   let resultCount = 0;
 
   // Load global CLAUDE.md as additional system context (shared across all groups)
@@ -435,11 +496,12 @@ async function runQuery(
     log(`Additional directories: ${extraDirs.join(', ')}`);
   }
 
-  for await (const message of query({
-    prompt: stream,
-    options: {
-      cwd: '/workspace/group',
-      additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
+  try {
+    for await (const message of query({
+      prompt: stream,
+      options: {
+        cwd: '/workspace/group',
+        additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
       systemPrompt: globalClaudeMd
@@ -517,6 +579,7 @@ async function runQuery(
           { hooks: [createPreCompactHook(containerInput.assistantName)] },
         ],
       },
+      abortController,
     },
   })) {
     messageCount++;
@@ -532,6 +595,7 @@ async function runQuery(
 
     if (message.type === 'system' && message.subtype === 'init') {
       newSessionId = message.session_id;
+      lastSessionId = newSessionId;
       log(`Session initialized: ${newSessionId}`);
     }
 
@@ -563,12 +627,33 @@ async function runQuery(
       });
     }
   }
-
-  ipcPolling = false;
+  } catch (err) {
+    // AbortController.abort() causes the SDK iterator to throw. If we
+    // asked for the interrupt, swallow it; otherwise re-throw so the
+    // outer try/catch in main() can record the real error.
+    if (interrupted) {
+      log(
+        `Query aborted as requested: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } else {
+      throw err;
+    }
+  } finally {
+    ipcPolling = false;
+  }
   log(
-    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}`,
+    `Query done. Messages: ${messageCount}, results: ${resultCount}, lastAssistantUuid: ${lastAssistantUuid || 'none'}, closedDuringQuery: ${closedDuringQuery}, interrupted: ${interrupted}`,
   );
-  return { newSessionId, lastAssistantUuid, closedDuringQuery };
+  if (interrupted) {
+    // Surface a short, deterministic result so the host can tell the
+    // user what happened rather than surfacing an AbortError to the channel.
+    writeOutput({
+      status: 'success',
+      result: '(agent interrupted — session intact, send a new message to continue)',
+      newSessionId,
+    });
+  }
+  return { newSessionId, lastAssistantUuid, closedDuringQuery, interrupted };
 }
 
 interface ScriptResult {
