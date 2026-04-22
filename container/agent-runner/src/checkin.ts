@@ -79,8 +79,9 @@ async function main(): Promise<void> {
       prompt: payload.question,
       options: {
         cwd: '/workspace/group',
-        // Light model — sidecar answers should be fast, not thorough.
-        model: process.env.NANOCLAW_CHECKIN_MODEL || 'claude-haiku-4-5',
+        // Sonnet 4.6 for sidecar answers — strong enough to reason about
+        // context but still quick. Override via NANOCLAW_CHECKIN_MODEL.
+        model: process.env.NANOCLAW_CHECKIN_MODEL || 'claude-sonnet-4-6',
         systemPrompt: {
           type: 'preset' as const,
           preset: 'claude_code' as const,
