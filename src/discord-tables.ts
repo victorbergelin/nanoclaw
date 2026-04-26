@@ -32,18 +32,7 @@ function padRow(row: string[], width: number): string[] {
   return out;
 }
 
-function buildEmbed(
-  header: string[],
-  rows: string[][],
-  rawTable: string,
-): APIEmbed {
-  if (header.length > 3 || rows.length > 25) {
-    return {
-      color: DISCORD_BLURPLE,
-      description: '```\n' + rawTable + '\n```',
-    };
-  }
-
+function buildEmbed(header: string[], rows: string[][]): APIEmbed {
   const fields = rows.map((row) => {
     const padded = padRow(row, header.length);
     if (header.length === 1) {
@@ -68,6 +57,7 @@ export function splitMarkdownTables(input: string): SplitForDiscord {
   const outLines: string[] = [];
   const embeds: APIEmbed[] = [];
   let inFence = false;
+  let modified = false;
   let i = 0;
 
   while (i < lines.length) {
@@ -98,8 +88,15 @@ export function splitMarkdownTables(input: string): SplitForDiscord {
         rawLines.push(lines[j]);
         j++;
       }
-      embeds.push(buildEmbed(header, bodyRows, rawLines.join('\n')));
-      outLines.push('');
+      if (header.length > 3 || bodyRows.length > 25) {
+        outLines.push('```');
+        outLines.push(...rawLines);
+        outLines.push('```');
+      } else {
+        embeds.push(buildEmbed(header, bodyRows));
+        outLines.push('');
+      }
+      modified = true;
       i = j;
       continue;
     }
@@ -108,7 +105,7 @@ export function splitMarkdownTables(input: string): SplitForDiscord {
     i++;
   }
 
-  if (embeds.length === 0) return { text: input, embeds: [] };
+  if (!modified) return { text: input, embeds: [] };
 
   const text = outLines
     .join('\n')

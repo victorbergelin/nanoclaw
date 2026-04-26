@@ -46,18 +46,20 @@ describe('splitMarkdownTables', () => {
     ]);
   });
 
-  it('falls back to code-block embed description for >3 column tables', () => {
+  it('wraps >3 column tables in an inline code fence and emits no embed', () => {
     const input = [
+      'before',
       '| a | b | c | d | e |',
       '|---|---|---|---|---|',
       '| 1 | 2 | 3 | 4 | 5 |',
+      'after',
     ].join('\n');
     const result = splitMarkdownTables(input);
-    expect(result.embeds).toHaveLength(1);
-    const embed = result.embeds[0];
-    expect(embed.fields).toBeUndefined();
-    expect(embed.description).toContain('```');
-    expect(embed.description).toContain('| 1 | 2 | 3 | 4 | 5 |');
+    expect(result.embeds).toEqual([]);
+    expect(result.text).toContain('```');
+    expect(result.text).toContain('| 1 | 2 | 3 | 4 | 5 |');
+    expect(result.text).toContain('before');
+    expect(result.text).toContain('after');
   });
 
   it('leaves tables inside fenced code blocks untouched', () => {
