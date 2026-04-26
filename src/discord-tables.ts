@@ -89,7 +89,11 @@ export function splitMarkdownTables(input: string): SplitForDiscord {
       const rawLines = [line, lines[i + 1]];
       const bodyRows: string[][] = [];
       let j = i + 2;
-      while (j < lines.length && isTableRow(lines[j]) && !isSeparatorRow(lines[j])) {
+      while (
+        j < lines.length &&
+        isTableRow(lines[j]) &&
+        !isSeparatorRow(lines[j])
+      ) {
         bodyRows.push(splitRow(lines[j]));
         rawLines.push(lines[j]);
         j++;
@@ -106,6 +110,9 @@ export function splitMarkdownTables(input: string): SplitForDiscord {
 
   if (embeds.length === 0) return { text: input, embeds: [] };
 
-  const text = outLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  const text = outLines
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
   return { text, embeds };
 }

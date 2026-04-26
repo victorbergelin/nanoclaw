@@ -406,7 +406,7 @@ export class DiscordChannel implements Channel, DiscordHistoryProvider {
         }
       } else {
         const trimmed = stripped.trim();
-        const embedChunks: typeof embeds[] = [];
+        const embedChunks: (typeof embeds)[] = [];
         for (let i = 0; i < embeds.length; i += MAX_EMBEDS_PER_MESSAGE) {
           embedChunks.push(embeds.slice(i, i + MAX_EMBEDS_PER_MESSAGE));
         }
@@ -556,7 +556,10 @@ export class DiscordChannel implements Channel, DiscordHistoryProvider {
         // guild.channels.fetch() returns top-level channels (not threads).
         // We accept text and announcement channels — the bot reads both.
         const t = ch.type;
-        if (t !== ChannelType.GuildText && t !== ChannelType.GuildAnnouncement) {
+        if (
+          t !== ChannelType.GuildText &&
+          t !== ChannelType.GuildAnnouncement
+        ) {
           continue;
         }
         const topic =
@@ -599,9 +602,7 @@ export class DiscordChannel implements Channel, DiscordHistoryProvider {
           guildId: tc.guildId ?? null,
           authorId: m.author.id,
           authorName:
-            m.member?.displayName ||
-            m.author.displayName ||
-            m.author.username,
+            m.member?.displayName || m.author.displayName || m.author.username,
           content: m.content,
           timestamp: m.createdAt.toISOString(),
           replyToMessageId: m.reference?.messageId ?? undefined,

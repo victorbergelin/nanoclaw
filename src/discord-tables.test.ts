@@ -61,13 +61,9 @@ describe('splitMarkdownTables', () => {
   });
 
   it('leaves tables inside fenced code blocks untouched', () => {
-    const input = [
-      '```',
-      '| a | b |',
-      '|---|---|',
-      '| 1 | 2 |',
-      '```',
-    ].join('\n');
+    const input = ['```', '| a | b |', '|---|---|', '| 1 | 2 |', '```'].join(
+      '\n',
+    );
     const result = splitMarkdownTables(input);
     expect(result.embeds).toEqual([]);
     expect(result.text).toBe(input);
