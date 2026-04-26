@@ -7,7 +7,6 @@ import {
   DATA_DIR,
   DEFAULT_TRIGGER,
   getTriggerPattern,
-  GROUPS_DIR,
   IDLE_TIMEOUT,
   MAX_MESSAGES_PER_PROMPT,
   POLL_INTERVAL,
@@ -15,6 +14,7 @@ import {
 } from './config.js';
 import { startCredentialProxy } from './credential-proxy.js';
 import './channels/index.js';
+import { DiscordChannel } from './channels/discord.js';
 import {
   getChannelFactory,
   getRegisteredChannelNames,
@@ -145,28 +145,12 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   registeredGroups[jid] = group;
   setRegisteredGroup(jid, group);
 
-  // Create group folder
+  // Create group folder. Per-group CLAUDE.md is intentionally not created —
+  // instructions are sourced from groups/global/CLAUDE.md (appended to every
+  // container's system prompt by the agent-runner) plus groups/main/CLAUDE.md
+  // for is_main groups. Per-group folders are pure scratch (conversations,
+  // attachments, agent-written notes), with no instruction file to drift.
   fs.mkdirSync(path.join(groupDir, 'logs'), { recursive: true });
-
-  // Copy CLAUDE.md template into the new group folder so agents have
-  // identity and instructions from the first run.  (Fixes #1391)
-  const groupMdFile = path.join(groupDir, 'CLAUDE.md');
-  if (!fs.existsSync(groupMdFile)) {
-    const templateFile = path.join(
-      GROUPS_DIR,
-      group.isMain ? 'main' : 'global',
-      'CLAUDE.md',
-    );
-    if (fs.existsSync(templateFile)) {
-      let content = fs.readFileSync(templateFile, 'utf-8');
-      if (ASSISTANT_NAME !== 'Andy') {
-        content = content.replace(/^# Andy$/m, `# ${ASSISTANT_NAME}`);
-        content = content.replace(/You are Andy/g, `You are ${ASSISTANT_NAME}`);
-      }
-      fs.writeFileSync(groupMdFile, content);
-      logger.info({ folder: group.folder }, 'Created CLAUDE.md from template');
-    }
-  }
 
   logger.info(
     { jid, name: group.name, folder: group.folder },
@@ -315,12 +299,7 @@ async function handleAsk(
   }
 
   const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  const checkinDir = path.join(
-    DATA_DIR,
-    'ipc',
-    info.groupFolder,
-    'checkin',
-  );
+  const checkinDir = path.join(DATA_DIR, 'ipc', info.groupFolder, 'checkin');
   fs.mkdirSync(checkinDir, { recursive: true });
   const qPath = path.join(checkinDir, `${id}.q.json`);
   const aPath = path.join(checkinDir, `${id}.a.json`);
@@ -329,11 +308,9 @@ async function handleAsk(
   fs.renameSync(tmpPath, qPath);
 
   try {
-    execInContainer(
-      info.containerName,
-      ['node', '/tmp/dist/checkin.js', id],
-      { timeoutMs: 120_000 },
-    );
+    execInContainer(info.containerName, ['node', '/tmp/dist/checkin.js', id], {
+      timeoutMs: 120_000,
+    });
   } catch (err) {
     await reply(
       `Couldn't reach the sidecar: ${err instanceof Error ? err.message : String(err)}`,
@@ -1090,6 +1067,8 @@ async function main(): Promise<void> {
     getAvailableGroups,
     writeGroupsSnapshot: (gf, im, ag, rj) =>
       writeGroupsSnapshot(gf, im, ag, rj),
+    getDiscordHistory: () =>
+      channels.find((ch): ch is DiscordChannel => ch instanceof DiscordChannel),
     onTasksChanged: () => {
       const tasks = getAllTasks();
       const taskRows = tasks.map((t) => ({

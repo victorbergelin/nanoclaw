@@ -649,6 +649,93 @@ server.tool(
   },
 );
 
+// --- Live Discord queries (Phase 2b: cross-channel via the bot client) ---
+// These bypass the local DB and reach the Discord API directly through the
+// host's connected bot. They surface channels you've never registered and
+// messages from before the bot started observing. Non-main groups are
+// authorized by guild membership on the host side; cross-guild access is
+// rejected unless the caller is the main group.
+
+server.tool(
+  'discord_list_channels',
+  'List text channels in a Discord server (guild) live via the bot. Defaults to the current chat\'s guild. Use this to find channelId values to pass to discord_fetch_messages — e.g. when the user says "what did we say in #briefing".',
+  {
+    guildId: z
+      .string()
+      .optional()
+      .describe(
+        'Optional Discord guild ID. Defaults to the current chat\'s guild. Cross-guild requests require the main group.',
+      ),
+  },
+  async (args) => {
+    const body = (await writeQueryAndWait(
+      {
+        type: 'list-discord-channels',
+        guildId: args.guildId,
+      },
+      15000,
+    )) as { channels?: unknown[]; guildId?: string; error?: string };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: body.error
+            ? `Error: ${body.error}`
+            : JSON.stringify(
+                { guildId: body.guildId, channels: body.channels ?? [] },
+                null,
+                2,
+              ),
+        },
+      ],
+    };
+  },
+);
+
+server.tool(
+  'discord_fetch_messages',
+  'Fetch recent messages from a Discord text channel live via the bot. Unlike get_messages (which reads NanoClaw\'s local DB), this hits the Discord API and includes history from before the bot was added to NanoClaw. Restricted to channels in the same guild as the current chat unless invoked by the main group.',
+  {
+    channelId: z
+      .string()
+      .describe(
+        'Discord channel ID (numeric string, e.g. "1234567890123456"). Find it with discord_list_channels.',
+      ),
+    limit: z
+      .number()
+      .int()
+      .optional()
+      .describe('Max messages to return (1–100, default 50).'),
+    before: z
+      .string()
+      .optional()
+      .describe(
+        'Optional message ID — fetch messages older than this one. Use for paging back through history.',
+      ),
+  },
+  async (args) => {
+    const body = (await writeQueryAndWait(
+      {
+        type: 'fetch-discord-messages',
+        channelId: args.channelId,
+        limit: args.limit,
+        before: args.before,
+      },
+      15000,
+    )) as { messages?: unknown[]; error?: string };
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: body.error
+            ? `Error: ${body.error}`
+            : JSON.stringify(body.messages ?? [], null, 2),
+        },
+      ],
+    };
+  },
+);
+
 // Start the stdio transport
 const transport = new StdioServerTransport();
 await server.connect(transport);

@@ -473,12 +473,23 @@ async function runQuery(
   let lastAssistantUuid: string | undefined;
   let resultCount = 0;
 
-  // Load global CLAUDE.md as additional system context (shared across all groups)
+  // Build the appended system context: global CLAUDE.md (every group) plus
+  // groups/main/CLAUDE.md (only for is_main groups, which carries the admin
+  // extras: group management, mounts, allowlist, scheduling, self-edit).
+  const appendChunks: string[] = [];
   const globalClaudeMdPath = '/workspace/global/CLAUDE.md';
-  let globalClaudeMd: string | undefined;
-  if (!containerInput.isMain && fs.existsSync(globalClaudeMdPath)) {
-    globalClaudeMd = fs.readFileSync(globalClaudeMdPath, 'utf-8');
+  if (fs.existsSync(globalClaudeMdPath)) {
+    appendChunks.push(fs.readFileSync(globalClaudeMdPath, 'utf-8'));
   }
+  if (containerInput.isMain) {
+    const mainClaudeMdPath = '/workspace/project/groups/main/CLAUDE.md';
+    if (fs.existsSync(mainClaudeMdPath)) {
+      appendChunks.push(fs.readFileSync(mainClaudeMdPath, 'utf-8'));
+    }
+  }
+  const appendedClaudeMd = appendChunks.length
+    ? appendChunks.join('\n\n')
+    : undefined;
 
   // Discover additional directories mounted at /workspace/extra/*
   // These are passed to the SDK so their CLAUDE.md files are loaded automatically
@@ -508,11 +519,11 @@ async function runQuery(
         additionalDirectories: extraDirs.length > 0 ? extraDirs : undefined,
       resume: sessionId,
       resumeSessionAt: resumeAt,
-      systemPrompt: globalClaudeMd
+      systemPrompt: appendedClaudeMd
         ? {
             type: 'preset' as const,
             preset: 'claude_code' as const,
-            append: globalClaudeMd,
+            append: appendedClaudeMd,
           }
         : undefined,
       allowedTools: [
@@ -537,7 +548,9 @@ async function runQuery(
         'mcp__nanoclaw__*',
         'mcp__apple__*',
         'mcp__discord__*',
+        'mcp__github__*',
         'mcp__gmail__*',
+        'mcp__bokio__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -571,6 +584,18 @@ async function runQuery(
             url: process.env.GITHUB_MCP_URL,
           },
         }),
+        ...(process.env.WHOOP_MCP_URL && {
+          whoop: {
+            type: 'sse' as const,
+            url: process.env.WHOOP_MCP_URL,
+          },
+        }),
+        ...(process.env.BOKIO_MCP_URL && {
+          bokio: {
+            type: 'sse' as const,
+            url: process.env.BOKIO_MCP_URL,
+          },
+        }),
         ...(process.env.GMAIL_MCP_ENABLED === '1' && {
           gmail: {
             command: 'npx',
@@ -601,6 +626,21 @@ async function runQuery(
       newSessionId = message.session_id;
       lastSessionId = newSessionId;
       log(`Session initialized: ${newSessionId}`);
+      // Dump the init payload's tool list so we can see exactly which tools
+      // the SDK is exposing to the agent this turn. Bottis has been claiming
+      // MCP tools are absent while the hub shows successful handshakes —
+      // this lets us diagnose whether tools are really missing from the
+      // agent's view or the agent is hallucinating from the transcript.
+      const initTools = (message as { tools?: string[] }).tools;
+      if (Array.isArray(initTools)) {
+        const mcpTools = initTools.filter((t) => t.startsWith('mcp__'));
+        log(`Init tools total=${initTools.length} mcp=${mcpTools.length}`);
+        log(`MCP tools: ${mcpTools.join(', ')}`);
+      } else {
+        log(
+          `Init payload had no "tools" field — keys=${Object.keys(message).join(',')}`,
+        );
+      }
     }
 
     if (

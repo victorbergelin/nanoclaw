@@ -103,6 +103,38 @@ export interface Channel {
 // Callback type that channels use to deliver inbound messages
 export type OnInboundMessage = (chatJid: string, message: NewMessage) => void;
 
+// --- Discord history provider (cross-channel fetch via the bot) ---
+
+export interface DiscordHistoryMessage {
+  id: string;
+  channelId: string;
+  channelName: string;
+  guildId: string | null;
+  authorId: string;
+  authorName: string;
+  content: string;
+  timestamp: string;
+  replyToMessageId?: string;
+}
+
+export interface DiscordChannelInfo {
+  id: string;
+  name: string;
+  type: string;
+  topic: string | null;
+}
+
+/** Implemented by DiscordChannel; consumed by the IPC handler so it can
+ *  reach across channels via the live bot client (not the local DB). */
+export interface DiscordHistoryProvider {
+  getChannelGuildId(channelId: string): Promise<string | null>;
+  listGuildChannels(guildId: string): Promise<DiscordChannelInfo[]>;
+  fetchChannelMessages(
+    channelId: string,
+    opts: { limit?: number; before?: string },
+  ): Promise<DiscordHistoryMessage[]>;
+}
+
 // Callback for chat metadata discovery.
 // name is optional — channels that deliver names inline (Telegram) pass it here;
 // channels that sync names separately (via syncGroups) omit it.

@@ -16,7 +16,7 @@ import {
 } from './db.js';
 import { isValidGroupFolder } from './group-folder.js';
 import { logger } from './logger.js';
-import { RegisteredGroup } from './types.js';
+import { DiscordHistoryProvider, RegisteredGroup } from './types.js';
 
 export interface IpcDeps {
   sendMessage: (jid: string, text: string) => Promise<void>;
@@ -31,6 +31,11 @@ export interface IpcDeps {
     registeredJids: Set<string>,
   ) => void;
   onTasksChanged: () => void;
+  /** Live Discord client wrapper. Optional — only present when the
+   *  Discord channel is connected. Used by discord_fetch_messages /
+   *  discord_list_channels MCP tools to reach across channels via the
+   *  bot, bypassing the DB-only history scope. */
+  getDiscordHistory?: () => DiscordHistoryProvider | undefined;
 }
 
 let ipcWatcherRunning = false;
@@ -142,9 +147,10 @@ export function startIpcWatcher(deps: IpcDeps): void {
             const id = file.replace(/\.json$/, '');
             try {
               const data = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
-              const resp = handleHistoryQuery(data, {
+              const resp = await handleHistoryQuery(data, {
                 isMain,
                 callerJid,
+                discord: deps.getDiscordHistory?.(),
               });
               fs.mkdirSync(resultsDir, { recursive: true });
               const out = path.join(resultsDir, `${id}.json`);
@@ -222,10 +228,14 @@ export function startIpcWatcher(deps: IpcDeps): void {
  * tamper-proof because each container is mounted with its own namespace
  * only.
  */
-function handleHistoryQuery(
+async function handleHistoryQuery(
   data: { type?: string } & Record<string, unknown>,
-  ctx: { isMain: boolean; callerJid: string | undefined },
-): Record<string, unknown> {
+  ctx: {
+    isMain: boolean;
+    callerJid: string | undefined;
+    discord: DiscordHistoryProvider | undefined;
+  },
+): Promise<Record<string, unknown>> {
   const ownOnly = !ctx.isMain;
   const ownJid = ctx.callerJid;
 
@@ -233,16 +243,19 @@ function handleHistoryQuery(
     const all = listConversations();
     return {
       type: 'list-conversations',
-      conversations: ownOnly
-        ? all.filter((c) => c.chatJid === ownJid)
-        : all,
+      conversations: ownOnly ? all.filter((c) => c.chatJid === ownJid) : all,
     };
   }
 
   if (data.type === 'get-messages') {
     let chatJid = typeof data.chatJid === 'string' ? data.chatJid : undefined;
     if (ownOnly) {
-      if (!ownJid) return { type: 'get-messages', messages: [], error: 'unregistered caller' };
+      if (!ownJid)
+        return {
+          type: 'get-messages',
+          messages: [],
+          error: 'unregistered caller',
+        };
       chatJid = ownJid;
     }
     if (!chatJid) {
@@ -276,7 +289,95 @@ function handleHistoryQuery(
     return { type: 'search-messages', messages: msgs };
   }
 
+  if (
+    data.type === 'list-discord-channels' ||
+    data.type === 'fetch-discord-messages'
+  ) {
+    return handleDiscordLiveQuery(data, ctx);
+  }
+
   return { error: `unknown query type: ${String(data.type)}` };
+}
+
+/** Resolve the caller's Discord guild ID from their registered JID.
+ *  Accepts `dc:guild:<guildId>` directly, or `dc:<channelId>` via the
+ *  bot client. Returns null if the caller isn't a Discord chat. */
+async function resolveCallerGuild(
+  callerJid: string | undefined,
+  discord: DiscordHistoryProvider,
+): Promise<string | null> {
+  if (!callerJid || !callerJid.startsWith('dc:')) return null;
+  if (callerJid.startsWith('dc:guild:')) {
+    return callerJid.replace(/^dc:guild:/, '');
+  }
+  const channelId = callerJid.replace(/^dc:/, '');
+  return discord.getChannelGuildId(channelId);
+}
+
+/** Live Discord queries — go through the bot client, not the local DB.
+ *  Main groups can read any guild the bot is in; non-main groups are
+ *  scoped to channels in their own guild. */
+async function handleDiscordLiveQuery(
+  data: { type?: string } & Record<string, unknown>,
+  ctx: {
+    isMain: boolean;
+    callerJid: string | undefined;
+    discord: DiscordHistoryProvider | undefined;
+  },
+): Promise<Record<string, unknown>> {
+  const type = data.type as string;
+  if (!ctx.discord) {
+    return { type, error: 'Discord channel not connected' };
+  }
+
+  const callerGuild = ctx.isMain
+    ? null
+    : await resolveCallerGuild(ctx.callerJid, ctx.discord);
+  if (!ctx.isMain && !callerGuild) {
+    return { type, error: 'caller is not a Discord chat in a known guild' };
+  }
+
+  if (type === 'list-discord-channels') {
+    const requested =
+      typeof data.guildId === 'string' && data.guildId ? data.guildId : null;
+    const guildId = ctx.isMain ? requested || callerGuild : callerGuild;
+    if (!guildId) {
+      return {
+        type,
+        error: 'guildId required (no current guild to default to)',
+      };
+    }
+    if (!ctx.isMain && requested && requested !== callerGuild) {
+      return { type, error: 'cross-guild listing requires the main group' };
+    }
+    const channels = await ctx.discord.listGuildChannels(guildId);
+    return { type, guildId, channels };
+  }
+
+  if (type === 'fetch-discord-messages') {
+    const channelId =
+      typeof data.channelId === 'string' ? data.channelId : undefined;
+    if (!channelId) {
+      return { type, messages: [], error: 'channelId required' };
+    }
+    if (!ctx.isMain) {
+      const targetGuild = await ctx.discord.getChannelGuildId(channelId);
+      if (!targetGuild || targetGuild !== callerGuild) {
+        return {
+          type,
+          messages: [],
+          error: 'channel is in a different guild — main group only',
+        };
+      }
+    }
+    const messages = await ctx.discord.fetchChannelMessages(channelId, {
+      limit: typeof data.limit === 'number' ? data.limit : undefined,
+      before: typeof data.before === 'string' ? data.before : undefined,
+    });
+    return { type, messages };
+  }
+
+  return { type, error: `unknown discord query type: ${type}` };
 }
 
 export async function processTaskIpc(

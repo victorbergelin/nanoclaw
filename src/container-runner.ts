@@ -216,6 +216,19 @@ function buildVolumeMounts(
     });
   }
 
+  // gh CLI auth — mount host's ~/.config/gh read-only so `gh` inside the
+  // container inherits the host's GitHub login. Requires `gh auth login`
+  // on the host with repo scope. Tied to host state: if the host token
+  // expires or the user logs out, the container loses gh access.
+  const ghConfigDir = path.join(os.homedir(), '.config', 'gh');
+  if (fs.existsSync(ghConfigDir)) {
+    mounts.push({
+      hostPath: ghConfigDir,
+      containerPath: '/home/node/.config/gh',
+      readonly: true,
+    });
+  }
+
   // Per-group IPC namespace: each group gets its own IPC directory
   // This prevents cross-group privilege escalation via IPC
   const groupIpcDir = resolveGroupIpcPath(group.folder);
@@ -305,6 +318,14 @@ function buildContainerArgs(
     args.push(
       '-e',
       `GITHUB_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/github/sse`,
+    );
+    args.push(
+      '-e',
+      `WHOOP_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/whoop/sse`,
+    );
+    args.push(
+      '-e',
+      `BOKIO_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/bokio/sse`,
     );
   } else {
     // Apple MCP bridge — optional. If the host is running apple-mcp via mcp-proxy,

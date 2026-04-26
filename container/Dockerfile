@@ -23,14 +23,37 @@ RUN apt-get update && apt-get install -y \
     libxshmfence1 \
     curl \
     git \
+    ca-certificates \
+    gnupg \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install GitHub CLI (gh) — used by the self-edit PR workflow.
+# Canonical install instructions: https://cli.github.com/manual/installation
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
 # Set Chromium path for agent-browser
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium
 
-# Install agent-browser and claude-code globally
-RUN npm install -g agent-browser @anthropic-ai/claude-code
+# Install agent-browser, claude-code, and pnpm globally
+RUN npm install -g agent-browser @anthropic-ai/claude-code pnpm
+
+# Default git identity so the agent can commit without per-session bootstrap.
+# Groups can override with a local `git config user.email ...` if needed.
+RUN git config --system user.name "NanoClaw Bot" \
+ && git config --system user.email "bot@nanoclaw.local"
+
+# Per-group persistent npm prefix: `npm install -g <pkg>` from inside the
+# container lands in the group's writable /workspace/group mount, so globals
+# survive container recreation without needing sudo or apt.
+ENV NPM_CONFIG_PREFIX=/workspace/group/.npm-global
+ENV PATH=/workspace/group/.npm-global/bin:$PATH
 
 # Create app directory
 WORKDIR /app

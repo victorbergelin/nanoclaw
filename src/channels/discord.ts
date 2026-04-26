@@ -3,6 +3,7 @@ import path from 'path';
 
 import {
   AttachmentBuilder,
+  ChannelType,
   Client,
   Events,
   GatewayIntentBits,
@@ -11,6 +12,7 @@ import {
 } from 'discord.js';
 
 import { ASSISTANT_NAME, TRIGGER_PATTERN } from '../config.js';
+import { splitMarkdownTables } from '../discord-tables.js';
 import { readEnvFile } from '../env.js';
 import { resolveGroupFolderPath } from '../group-folder.js';
 import { logger } from '../logger.js';
@@ -18,6 +20,9 @@ import { transcribeAudioBuffer } from '../transcription.js';
 import { registerChannel, ChannelOpts } from './registry.js';
 import {
   Channel,
+  DiscordChannelInfo,
+  DiscordHistoryMessage,
+  DiscordHistoryProvider,
   OnChatMetadata,
   OnInboundMessage,
   RegisteredGroup,
@@ -56,10 +61,12 @@ function uniqueFolder(
   if (base && !taken.has(base)) return base;
   const suffix = seedId.slice(-6);
   const candidate = base ? `${base}-${suffix}` : `dc-${suffix}`;
-  return taken.has(candidate) ? `${candidate}-${Date.now().toString(36)}` : candidate;
+  return taken.has(candidate)
+    ? `${candidate}-${Date.now().toString(36)}`
+    : candidate;
 }
 
-export class DiscordChannel implements Channel {
+export class DiscordChannel implements Channel, DiscordHistoryProvider {
   name = 'discord';
 
   private client: Client | null = null;
@@ -385,13 +392,42 @@ export class DiscordChannel implements Channel {
 
       const textChannel = channel as TextChannel;
 
-      // Discord has a 2000 character limit per message — split if needed
       const MAX_LENGTH = 2000;
-      if (text.length <= MAX_LENGTH) {
-        await textChannel.send(text);
+      const MAX_EMBEDS_PER_MESSAGE = 10;
+      const { text: stripped, embeds } = splitMarkdownTables(text);
+
+      if (embeds.length === 0) {
+        if (text.length <= MAX_LENGTH) {
+          await textChannel.send(text);
+        } else {
+          for (let i = 0; i < text.length; i += MAX_LENGTH) {
+            await textChannel.send(text.slice(i, i + MAX_LENGTH));
+          }
+        }
       } else {
-        for (let i = 0; i < text.length; i += MAX_LENGTH) {
-          await textChannel.send(text.slice(i, i + MAX_LENGTH));
+        const trimmed = stripped.trim();
+        const embedChunks: typeof embeds[] = [];
+        for (let i = 0; i < embeds.length; i += MAX_EMBEDS_PER_MESSAGE) {
+          embedChunks.push(embeds.slice(i, i + MAX_EMBEDS_PER_MESSAGE));
+        }
+
+        if (trimmed.length === 0) {
+          for (const chunk of embedChunks) {
+            await textChannel.send({ embeds: chunk });
+          }
+        } else if (trimmed.length <= MAX_LENGTH) {
+          const [first, ...rest] = embedChunks;
+          await textChannel.send({ content: trimmed, embeds: first });
+          for (const chunk of rest) {
+            await textChannel.send({ embeds: chunk });
+          }
+        } else {
+          for (let i = 0; i < trimmed.length; i += MAX_LENGTH) {
+            await textChannel.send(trimmed.slice(i, i + MAX_LENGTH));
+          }
+          for (const chunk of embedChunks) {
+            await textChannel.send({ embeds: chunk });
+          }
         }
       }
       logger.info(
@@ -485,6 +521,102 @@ export class DiscordChannel implements Channel {
 
   ownsJid(jid: string): boolean {
     return jid.startsWith('dc:');
+  }
+
+  // --- DiscordHistoryProvider: cross-channel fetch via the live bot client ---
+  // These power the container's discord_list_channels / discord_fetch_messages
+  // MCP tools. The IPC handler (src/ipc.ts) calls them after authorizing the
+  // request against the caller's guild.
+
+  async getChannelGuildId(channelId: string): Promise<string | null> {
+    if (!this.client) return null;
+    try {
+      const ch = await this.client.channels.fetch(channelId);
+      if (ch && 'guildId' in ch && typeof ch.guildId === 'string') {
+        return ch.guildId;
+      }
+      return null;
+    } catch (err) {
+      logger.warn(
+        { channelId, err },
+        'Discord: failed to resolve channel→guild',
+      );
+      return null;
+    }
+  }
+
+  async listGuildChannels(guildId: string): Promise<DiscordChannelInfo[]> {
+    if (!this.client) return [];
+    try {
+      const guild = await this.client.guilds.fetch(guildId);
+      const all = await guild.channels.fetch();
+      const out: DiscordChannelInfo[] = [];
+      for (const ch of all.values()) {
+        if (!ch) continue;
+        // guild.channels.fetch() returns top-level channels (not threads).
+        // We accept text and announcement channels — the bot reads both.
+        const t = ch.type;
+        if (t !== ChannelType.GuildText && t !== ChannelType.GuildAnnouncement) {
+          continue;
+        }
+        const topic =
+          'topic' in ch && typeof (ch as TextChannel).topic === 'string'
+            ? (ch as TextChannel).topic
+            : null;
+        out.push({
+          id: ch.id,
+          name: ch.name,
+          type: ChannelType[t] || String(t),
+          topic,
+        });
+      }
+      return out;
+    } catch (err) {
+      logger.warn({ guildId, err }, 'Discord: failed to list guild channels');
+      return [];
+    }
+  }
+
+  async fetchChannelMessages(
+    channelId: string,
+    opts: { limit?: number; before?: string } = {},
+  ): Promise<DiscordHistoryMessage[]> {
+    if (!this.client) return [];
+    try {
+      const ch = await this.client.channels.fetch(channelId);
+      if (!ch || !ch.isTextBased() || !('messages' in ch)) return [];
+      const tc = ch as TextChannel;
+      const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100);
+      const fetchOpts: { limit: number; before?: string } = { limit };
+      if (opts.before) fetchOpts.before = opts.before;
+      const messages = await tc.messages.fetch(fetchOpts);
+      const out: DiscordHistoryMessage[] = [];
+      for (const m of messages.values()) {
+        out.push({
+          id: m.id,
+          channelId: tc.id,
+          channelName: tc.name,
+          guildId: tc.guildId ?? null,
+          authorId: m.author.id,
+          authorName:
+            m.member?.displayName ||
+            m.author.displayName ||
+            m.author.username,
+          content: m.content,
+          timestamp: m.createdAt.toISOString(),
+          replyToMessageId: m.reference?.messageId ?? undefined,
+        });
+      }
+      // Discord returns newest-first; oldest-first reads more naturally.
+      out.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+      return out;
+    } catch (err) {
+      logger.warn(
+        { channelId, err },
+        'Discord: failed to fetch channel messages',
+      );
+      return [];
+    }
   }
 
   async disconnect(): Promise<void> {

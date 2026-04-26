@@ -101,9 +101,10 @@ export function execInContainer(
     CONTAINER_RUNTIME_BIN,
     ['exec', '--user', user, name, ...args],
     {
-    stdio: ['ignore', 'pipe', 'pipe'],
-    detached: false,
-  });
+      stdio: ['ignore', 'pipe', 'pipe'],
+      detached: false,
+    },
+  );
   proc.stdout?.on('data', () => {});
   proc.stderr?.on('data', (chunk: Buffer) => {
     logger.debug(
