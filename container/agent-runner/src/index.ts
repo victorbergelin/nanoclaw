@@ -551,6 +551,7 @@ async function runQuery(
         'mcp__github__*',
         'mcp__gmail__*',
         'mcp__bokio__*',
+        'mcp__whoop__*',
       ],
       env: sdkEnv,
       permissionMode: 'bypassPermissions',
@@ -566,6 +567,11 @@ async function runQuery(
             NANOCLAW_IS_MAIN: containerInput.isMain ? '1' : '0',
           },
         },
+        // Remote MCP servers connect via the SDK's native SSE transport — no
+        // npx/mcp-remote subprocess. Cuts cold start from a multi-second
+        // OAuth-discovery + 405-fallback dance to a single TCP connect to the
+        // host's mcp-proxy hub, and removes a per-server stdio shim that was
+        // a frequent source of "MCP tools missing from init" failures.
         ...(process.env.APPLE_MCP_URL && {
           apple: {
             type: 'sse' as const,
