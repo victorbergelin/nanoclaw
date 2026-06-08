@@ -191,7 +191,9 @@ export class WhatsAppChannel implements Channel {
 
         if (shouldReconnect) {
           if (this.reconnecting) {
-            logger.debug('Reconnect already in flight, ignoring duplicate close');
+            logger.debug(
+              'Reconnect already in flight, ignoring duplicate close',
+            );
             return;
           }
           this.reconnecting = true;

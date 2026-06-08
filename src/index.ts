@@ -53,6 +53,7 @@ import {
 import { GroupQueue } from './group-queue.js';
 import { resolveGroupFolderPath } from './group-folder.js';
 import { startIpcWatcher } from './ipc.js';
+import { startLivenessMonitor } from './liveness.js';
 import {
   extractAttachments,
   findChannel,
@@ -1015,6 +1016,13 @@ async function main(): Promise<void> {
   // Create and connect all registered channels.
   // Each channel self-registers via the barrel import above.
   // Factories return null when credentials are missing, so unconfigured channels are skipped.
+  //
+  // Connecting in parallel with a per-channel timeout. Serial-await was the
+  // root cause of the June 2 zombie: WhatsApp's connect() never resolves if
+  // the network is down at boot, which blocked every other channel from ever
+  // starting (process alive, no inbound for 6 days).
+  const CHANNEL_CONNECT_TIMEOUT_MS = 30_000;
+  const candidates: Channel[] = [];
   for (const channelName of getRegisteredChannelNames()) {
     const factory = getChannelFactory(channelName)!;
     const channel = factory(channelOpts);
@@ -1025,13 +1033,57 @@ async function main(): Promise<void> {
       );
       continue;
     }
-    channels.push(channel);
-    await channel.connect();
+    candidates.push(channel);
+  }
+  const results = await Promise.allSettled(
+    candidates.map(async (channel) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          channel.connect(),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `connect timeout after ${CHANNEL_CONNECT_TIMEOUT_MS}ms`,
+                  ),
+                ),
+              CHANNEL_CONNECT_TIMEOUT_MS,
+            );
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      return channel;
+    }),
+  );
+  for (let i = 0; i < results.length; i++) {
+    const r = results[i];
+    if (r.status === 'fulfilled') {
+      channels.push(candidates[i]);
+      logger.info({ channel: candidates[i].name }, 'Channel connected');
+    } else {
+      logger.error(
+        { channel: candidates[i].name, err: r.reason },
+        'Channel failed to connect — skipping. Liveness monitor will trigger a restart if it stays down.',
+      );
+    }
   }
   if (channels.length === 0) {
     logger.fatal('No channels connected');
     process.exit(1);
   }
+
+  // Liveness monitor: any channel disconnected for > 60s → process.exit(1)
+  // so launchd's KeepAlive restarts us. This catches the zombie state where
+  // a channel silently dies but the process keeps running.
+  startLivenessMonitor(channels, {
+    checkIntervalMs: 30_000,
+    failThresholdMs: 60_000,
+    startupGraceMs: 60_000,
+  });
 
   // Start subsystems (independently of connection handler)
   startSchedulerLoop({
