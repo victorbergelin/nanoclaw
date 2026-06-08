@@ -75,6 +75,9 @@ export class WhatsAppChannel implements Channel {
   private botLidUser?: string;
   /** Resolve the initial connect() once the first successful open happens. */
   private pendingFirstOpen?: () => void;
+  /** True while a reconnect is in flight — prevents duplicate reconnect storms
+   *  when a single socket fires multiple rapid close events. */
+  private reconnecting = false;
 
   private opts: WhatsAppChannelOpts;
 
@@ -90,6 +93,22 @@ export class WhatsAppChannel implements Channel {
   }
 
   private async connectInternal(): Promise<void> {
+    // Tear down any prior socket before creating a new one. Without this,
+    // the old socket's event listeners survive — its lingering close events
+    // fire another reconnect on top of the new socket, multiplying sockets
+    // until the heap fills (~33h of flaky network = 4GB OOM).
+    if (this.sock) {
+      try {
+        this.sock.ev.removeAllListeners('connection.update');
+        this.sock.ev.removeAllListeners('creds.update');
+        this.sock.ev.removeAllListeners('chats.phoneNumberShare');
+        this.sock.ev.removeAllListeners('messages.upsert');
+        this.sock.end(undefined);
+      } catch (err) {
+        logger.debug({ err }, 'Error tearing down prior WhatsApp socket');
+      }
+    }
+
     const authDir = path.join(STORE_DIR, 'auth');
     fs.mkdirSync(authDir, { recursive: true });
 
@@ -171,15 +190,24 @@ export class WhatsAppChannel implements Channel {
         );
 
         if (shouldReconnect) {
+          if (this.reconnecting) {
+            logger.debug('Reconnect already in flight, ignoring duplicate close');
+            return;
+          }
+          this.reconnecting = true;
           logger.info('Reconnecting...');
-          this.connectInternal().catch((err) => {
-            logger.error({ err }, 'Failed to reconnect, retrying in 5s');
-            setTimeout(() => {
-              this.connectInternal().catch((err2) => {
-                logger.error({ err: err2 }, 'Reconnection retry failed');
-              });
-            }, 5000);
-          });
+          this.connectInternal()
+            .catch((err) => {
+              logger.error({ err }, 'Failed to reconnect, retrying in 5s');
+              setTimeout(() => {
+                this.connectInternal().catch((err2) => {
+                  logger.error({ err: err2 }, 'Reconnection retry failed');
+                });
+              }, 5000);
+            })
+            .finally(() => {
+              this.reconnecting = false;
+            });
         } else {
           logger.info('Logged out. Run /setup to re-authenticate.');
           process.exit(0);

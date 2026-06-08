@@ -62,6 +62,10 @@ function createFakeSocket() {
       on: (event: string, handler: (...args: unknown[]) => void) => {
         ev.on(event, handler);
       },
+      removeAllListeners: vi.fn((event?: string) => {
+        if (event) ev.removeAllListeners(event);
+        else ev.removeAllListeners();
+      }),
     },
     user: {
       id: '1234567890:1@s.whatsapp.net',
@@ -355,6 +359,48 @@ describe('WhatsAppChannel', () => {
 
       // The channel sets a 5s retry — just verify it doesn't crash
       await new Promise((r) => setTimeout(r, 100));
+    });
+
+    it('tears down the prior socket before reconnecting', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+
+      await connectChannel(channel);
+
+      const initialEndCalls = fakeSocket.end.mock.calls.length;
+      const initialRemoveCalls =
+        fakeSocket.ev.removeAllListeners.mock.calls.length;
+
+      // Disconnect — triggers reconnect
+      triggerDisconnect(428);
+      await new Promise((r) => setTimeout(r, 10));
+
+      // The reconnect path must end() the prior socket and clear its
+      // listeners. Without this, repeated reconnects spawn overlapping
+      // sockets and leak memory (root cause of the OOM crashes).
+      expect(fakeSocket.end.mock.calls.length).toBeGreaterThan(initialEndCalls);
+      expect(
+        fakeSocket.ev.removeAllListeners.mock.calls.length,
+      ).toBeGreaterThan(initialRemoveCalls);
+    });
+
+    it('debounces rapid duplicate close events into a single reconnect', async () => {
+      const { makeWASocket } = await import('@whiskeysockets/baileys');
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+
+      await connectChannel(channel);
+
+      const initialMakeCalls = vi.mocked(makeWASocket).mock.calls.length;
+
+      // Fire 5 close events back-to-back, as happens during a real
+      // reconnect storm. Without dedup, each would spawn a new socket.
+      for (let i = 0; i < 5; i++) triggerDisconnect(428);
+      await new Promise((r) => setTimeout(r, 10));
+
+      // Exactly one extra socket should be created, not five.
+      const newMakeCalls = vi.mocked(makeWASocket).mock.calls.length;
+      expect(newMakeCalls - initialMakeCalls).toBe(1);
     });
   });
 
