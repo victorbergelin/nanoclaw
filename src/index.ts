@@ -1076,10 +1076,17 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  // Liveness monitor: any channel disconnected for > 60s → process.exit(1)
-  // so launchd's KeepAlive restarts us. This catches the zombie state where
-  // a channel silently dies but the process keeps running.
-  startLivenessMonitor(channels, {
+  // Liveness monitor: any expected channel disconnected for > 60s →
+  // process.exit(1) so launchd's KeepAlive restarts us.
+  //
+  // We watch `candidates` (every channel whose factory returned non-null),
+  // not just the `channels` array of successful ones. Without this, a
+  // channel that fails at startup (e.g. Discord DNS blip) is silently
+  // missing forever — the process keeps running but can't deliver messages
+  // to that channel's groups. Observed on PID 66760: Discord timed out at
+  // boot, bot ran 12h without Discord, the scheduler logged "No channel
+  // owns JID dc:..." when it tried to reply.
+  startLivenessMonitor(candidates, {
     checkIntervalMs: 30_000,
     failThresholdMs: 60_000,
     startupGraceMs: 60_000,
