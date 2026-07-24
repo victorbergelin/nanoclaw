@@ -159,6 +159,40 @@ function registerGroup(jid: string, group: RegisteredGroup): void {
   );
 }
 
+/** Derive a unique, filesystem-safe group folder from a chat JID. */
+function summonFolderForJid(chatJid: string): string {
+  return ('wa_' + chatJid.replace(/[^A-Za-z0-9]/g, '_')).slice(0, 64);
+}
+
+/**
+ * "Summon anywhere": the first time the owner addresses the assistant with the
+ * trigger word in a not-yet-registered WhatsApp chat, register that chat as a
+ * summon-only group so the message loop will process it. The WhatsApp channel
+ * already guarantees that only the owner's fromMe summons (and the bot's own
+ * replies) reach this handler for such chats, so no other participant can ever
+ * cause a registration or a trigger. Summon-only groups run fresh (no session
+ * resume) and never store other participants' messages.
+ */
+function maybeAutoRegisterSummon(chatJid: string, msg: NewMessage): void {
+  if (registeredGroups[chatJid]) return; // already registered
+  if (!msg.is_from_me) return; // only the owner can summon
+  if (findChannel(channels, chatJid)?.name !== 'whatsapp') return; // WhatsApp only
+  if (!getTriggerPattern().test(msg.content.trim())) return; // must be a summon
+
+  const folder = summonFolderForJid(chatJid);
+  const name = getAllChats().find((c) => c.jid === chatJid)?.name || chatJid;
+  registerGroup(chatJid, {
+    name,
+    folder,
+    trigger: DEFAULT_TRIGGER,
+    added_at: new Date().toISOString(),
+    requiresTrigger: true,
+    isMain: false,
+    summonOnly: true,
+  });
+  logger.info({ chatJid, folder, name }, 'Auto-registered WhatsApp summon chat');
+}
+
 /**
  * Get available groups list for the agent.
  * Returns groups ordered by most recent activity.
@@ -550,7 +584,11 @@ async function runAgent(
   onOutput?: (output: ContainerOutput) => Promise<void>,
 ): Promise<'success' | 'error'> {
   const isMain = group.isMain === true;
-  const sessionId = sessions[group.folder];
+  // Summon-only chats run fresh every time — never resume a session — so the
+  // shared "summon anywhere" usage can't accumulate an ever-growing session
+  // (which is what previously OOM'd a container). Recent context comes from the
+  // messages injected into the prompt plus the search_messages tool.
+  const sessionId = group.summonOnly ? undefined : sessions[group.folder];
 
   // Update tasks snapshot for container to read (filtered by group)
   const tasks = getAllTasks();
@@ -581,7 +619,7 @@ async function runAgent(
   // Wrap onOutput to track session ID from streamed results
   const wrappedOnOutput = onOutput
     ? async (output: ContainerOutput) => {
-        if (output.newSessionId) {
+        if (output.newSessionId && !group.summonOnly) {
           sessions[group.folder] = output.newSessionId;
           setSession(group.folder, output.newSessionId);
         }
@@ -605,7 +643,7 @@ async function runAgent(
       wrappedOnOutput,
     );
 
-    if (output.newSessionId) {
+    if (output.newSessionId && !group.summonOnly) {
       sessions[group.folder] = output.newSessionId;
       setSession(group.folder, output.newSessionId);
     }
@@ -999,6 +1037,11 @@ async function main(): Promise<void> {
           return;
         }
       }
+
+      // First owner-summon in a new WhatsApp chat registers it (summon-only)
+      // so the message loop will pick it up.
+      maybeAutoRegisterSummon(chatJid, msg);
+
       storeMessage(msg);
     },
     onChatMetadata: (

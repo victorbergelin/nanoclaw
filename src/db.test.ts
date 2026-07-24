@@ -650,3 +650,37 @@ describe('registered group isMain', () => {
     expect(group.isMain).toBeUndefined();
   });
 });
+
+// --- RegisteredGroup summonOnly round-trip ---
+
+describe('registered group summonOnly', () => {
+  it('persists summonOnly=true through set/get round-trip', () => {
+    setRegisteredGroup('summon@g.us', {
+      name: 'Summon Chat',
+      folder: 'wa_summon_g_us',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+      requiresTrigger: true,
+      summonOnly: true,
+    });
+
+    const groups = getAllRegisteredGroups();
+    const group = groups['summon@g.us'];
+    expect(group).toBeDefined();
+    expect(group.summonOnly).toBe(true);
+    expect(group.requiresTrigger).toBe(true);
+    expect(group.isMain).toBeUndefined();
+  });
+
+  it('omits summonOnly for ordinary groups', () => {
+    setRegisteredGroup('ordinary@g.us', {
+      name: 'Ordinary',
+      folder: 'wa_ordinary',
+      trigger: '@Andy',
+      added_at: '2024-01-01T00:00:00.000Z',
+    });
+
+    const groups = getAllRegisteredGroups();
+    expect(groups['ordinary@g.us'].summonOnly).toBeUndefined();
+  });
+});

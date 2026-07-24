@@ -26,6 +26,7 @@ import {
   ASSISTANT_HAS_OWN_NUMBER,
   ASSISTANT_NAME,
   STORE_DIR,
+  TRIGGER_PATTERN,
 } from '../config.js';
 import {
   getLastGroupSync,
@@ -300,40 +301,55 @@ export class WhatsAppChannel implements Channel {
           isGroup,
         );
 
-        // Only deliver full message for registered groups
         const groups = this.opts.registeredGroups();
-        if (groups[chatJid]) {
-          let content =
-            msg.message?.conversation ||
-            msg.message?.extendedTextMessage?.text ||
-            msg.message?.imageMessage?.caption ||
-            msg.message?.videoMessage?.caption ||
-            '';
+        const entry = groups[chatJid];
 
-          // WhatsApp group mentions use the LID in raw text (e.g. "@80355281346633")
-          // instead of the display name. Normalize to @AssistantName for trigger matching.
-          if (this.botLidUser && content.includes(`@${this.botLidUser}`)) {
-            content = content.replace(
-              `@${this.botLidUser}`,
-              `@${ASSISTANT_NAME}`,
-            );
-          }
+        let content =
+          msg.message?.conversation ||
+          msg.message?.extendedTextMessage?.text ||
+          msg.message?.imageMessage?.caption ||
+          msg.message?.videoMessage?.caption ||
+          '';
 
+        // WhatsApp group mentions use the LID in raw text (e.g. "@80355281346633")
+        // instead of the display name. Normalize to @AssistantName for trigger matching.
+        if (this.botLidUser && content.includes(`@${this.botLidUser}`)) {
+          content = content.replace(`@${this.botLidUser}`, `@${ASSISTANT_NAME}`);
+        }
+
+        const fromMe = msg.key.fromMe || false;
+        // Detect bot messages: with own number, fromMe is reliable
+        // since only the bot sends from that number.
+        // With shared number, bot messages carry the assistant name prefix
+        // (even in DMs/self-chat) so we check for that.
+        const isBotMessage = ASSISTANT_HAS_OWN_NUMBER
+          ? fromMe
+          : content.startsWith(`${ASSISTANT_NAME}:`);
+        // A "summon" is the owner (fromMe) addressing the assistant with the
+        // trigger word — this is what lets @Bottis work in any chat, and it is
+        // the ONLY way an unregistered chat gets delivered. Never fromMe → a
+        // non-owner can never summon, regardless of what they type.
+        const isSummon = fromMe && TRIGGER_PATTERN.test(content.trim());
+
+        // Delivery gate:
+        //  - Fully-registered chat  → deliver everything (unchanged behavior).
+        //  - Summon-only chat       → only the owner's summons and the bot's own
+        //                             replies; other participants are never stored.
+        //  - Unregistered chat      → only the owner's summons, which the
+        //                             orchestrator auto-registers as summon-only.
+        const deliver = entry
+          ? entry.summonOnly
+            ? isSummon || isBotMessage
+            : true
+          : isSummon;
+
+        if (deliver) {
           // Skip protocol messages with no text content (encryption keys, read receipts, etc.)
           // but allow voice messages through for transcription
           if (!content && !isVoiceMessage(msg)) continue;
 
           const sender = msg.key.participant || msg.key.remoteJid || '';
           const senderName = msg.pushName || sender.split('@')[0];
-
-          const fromMe = msg.key.fromMe || false;
-          // Detect bot messages: with own number, fromMe is reliable
-          // since only the bot sends from that number.
-          // With shared number, bot messages carry the assistant name prefix
-          // (even in DMs/self-chat) so we check for that.
-          const isBotMessage = ASSISTANT_HAS_OWN_NUMBER
-            ? fromMe
-            : content.startsWith(`${ASSISTANT_NAME}:`);
 
           // Transcribe voice messages before storing
           let finalContent = content;
@@ -365,7 +381,7 @@ export class WhatsAppChannel implements Channel {
             is_from_me: fromMe,
             is_bot_message: isBotMessage,
           });
-        } else if (chatJid !== rawJid) {
+        } else if (!entry && chatJid !== rawJid) {
           // LID translation produced a JID that doesn't match any registered group
           logger.warn(
             {

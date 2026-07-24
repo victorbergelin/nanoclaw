@@ -40,6 +40,9 @@ export interface RegisteredGroup {
   containerConfig?: ContainerConfig;
   requiresTrigger?: boolean; // Default: true for groups, false for solo chats
   isMain?: boolean; // True for the main control group (no trigger, elevated privileges)
+  summonOnly?: boolean; // Auto-registered "summon anywhere" chat: only the owner's
+  // fromMe @-trigger messages (and the bot's own replies) are delivered/stored; other
+  // participants' messages are never seen. Runs fresh (no session resume).
 }
 
 export interface NewMessage {

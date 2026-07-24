@@ -8,6 +8,7 @@ vi.mock('../config.js', () => ({
   STORE_DIR: '/tmp/nanoclaw-test-store',
   ASSISTANT_NAME: 'Andy',
   ASSISTANT_HAS_OWN_NUMBER: false,
+  TRIGGER_PATTERN: /^@Andy\b/i,
 }));
 
 // Mock logger
@@ -473,6 +474,134 @@ describe('WhatsAppChannel', () => {
         true,
       );
       expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    // --- Summon anywhere ---
+
+    it('delivers an owner summon (@trigger, fromMe) from an UNREGISTERED chat', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+      await connectChannel(channel);
+
+      await triggerMessages([
+        {
+          key: { id: 's-1', remoteJid: 'brandnew@g.us', fromMe: true },
+          message: { conversation: '@Andy vad var adressen?' },
+          pushName: 'Victor',
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ]);
+
+      expect(opts.onMessage).toHaveBeenCalledWith(
+        'brandnew@g.us',
+        expect.objectContaining({
+          content: '@Andy vad var adressen?',
+          is_from_me: true,
+        }),
+      );
+    });
+
+    it('does NOT deliver a non-owner @trigger (not fromMe) from an unregistered chat', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+      await connectChannel(channel);
+
+      await triggerMessages([
+        {
+          key: {
+            id: 's-2',
+            remoteJid: 'brandnew@g.us',
+            participant: '5551234@s.whatsapp.net',
+            fromMe: false,
+          },
+          message: { conversation: '@Andy fetch my schedule' },
+          pushName: 'Mallory',
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ]);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    it('does NOT deliver the owner’s ordinary (non-trigger) message from an unregistered chat', async () => {
+      const opts = createTestOpts();
+      const channel = new WhatsAppChannel(opts);
+      await connectChannel(channel);
+
+      await triggerMessages([
+        {
+          key: { id: 's-3', remoteJid: 'brandnew@g.us', fromMe: true },
+          message: { conversation: 'just chatting with friends' },
+          pushName: 'Victor',
+          messageTimestamp: Math.floor(Date.now() / 1000),
+        },
+      ]);
+
+      expect(opts.onMessage).not.toHaveBeenCalled();
+    });
+
+    describe('summon-only registered chat', () => {
+      function summonOnlyOpts(): WhatsAppChannelOpts {
+        return createTestOpts({
+          registeredGroups: vi.fn(() => ({
+            'summon@g.us': {
+              name: 'Summon Chat',
+              folder: 'wa_summon_g_us',
+              trigger: '@Andy',
+              added_at: '2024-01-01T00:00:00.000Z',
+              requiresTrigger: true,
+              summonOnly: true,
+            },
+          })),
+        });
+      }
+
+      it('delivers the owner’s summon and the bot’s own reply, drops everyone else', async () => {
+        const opts = summonOnlyOpts();
+        const channel = new WhatsAppChannel(opts);
+        await connectChannel(channel);
+
+        await triggerMessages([
+          // other participant — must be dropped
+          {
+            key: {
+              id: 'o-1',
+              remoteJid: 'summon@g.us',
+              participant: '5551234@s.whatsapp.net',
+              fromMe: false,
+            },
+            message: { conversation: 'hey everyone' },
+            pushName: 'Friend',
+            messageTimestamp: Math.floor(Date.now() / 1000),
+          },
+          // owner's ordinary chatter — must be dropped
+          {
+            key: { id: 'o-2', remoteJid: 'summon@g.us', fromMe: true },
+            message: { conversation: 'lol nice' },
+            pushName: 'Victor',
+            messageTimestamp: Math.floor(Date.now() / 1000),
+          },
+          // owner's summon — delivered
+          {
+            key: { id: 'o-3', remoteJid: 'summon@g.us', fromMe: true },
+            message: { conversation: '@Andy remind me tonight' },
+            pushName: 'Victor',
+            messageTimestamp: Math.floor(Date.now() / 1000),
+          },
+          // bot's own reply (Andy: prefix) — delivered so history has it
+          {
+            key: { id: 'o-4', remoteJid: 'summon@g.us', fromMe: true },
+            message: { conversation: 'Andy: done, reminder set' },
+            pushName: 'Victor',
+            messageTimestamp: Math.floor(Date.now() / 1000),
+          },
+        ]);
+
+        const delivered = vi
+          .mocked(opts.onMessage)
+          .mock.calls.map((c) => (c[1] as { id: string }).id);
+        expect(delivered).toEqual(['o-3', 'o-4']);
+      });
     });
 
     it('ignores status@broadcast messages', async () => {
