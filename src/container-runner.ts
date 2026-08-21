@@ -327,6 +327,14 @@ function buildContainerArgs(
       '-e',
       `BOKIO_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/bokio/sse`,
     );
+    args.push(
+      '-e',
+      `TRELLO_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/trello/sse`,
+    );
+    args.push(
+      '-e',
+      `ACCOUNTED_MCP_URL=http://${CONTAINER_HOST_GATEWAY}:${MCP_HUB_PORT}/accounted/sse`,
+    );
   } else {
     // Apple MCP bridge — optional. If the host is running apple-mcp via mcp-proxy,
     // the agent connects via SSE through the host gateway.

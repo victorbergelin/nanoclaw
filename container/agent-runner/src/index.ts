@@ -602,6 +602,18 @@ async function runQuery(
             url: process.env.BOKIO_MCP_URL,
           },
         }),
+        ...(process.env.TRELLO_MCP_URL && {
+          trello: {
+            type: 'sse' as const,
+            url: process.env.TRELLO_MCP_URL,
+          },
+        }),
+        ...(process.env.ACCOUNTED_MCP_URL && {
+          accounted: {
+            type: 'sse' as const,
+            url: process.env.ACCOUNTED_MCP_URL,
+          },
+        }),
         ...(process.env.GMAIL_MCP_ENABLED === '1' && {
           gmail: {
             command: 'npx',
