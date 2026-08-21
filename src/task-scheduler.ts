@@ -161,6 +161,13 @@ async function runTask(
   const TASK_CLOSE_DELAY_MS = 10000;
   let closeTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // Guild/aggregate JIDs (e.g. `dc:guild:*`) don't address a single channel;
+  // sending to them resolves to a fallback (last-active or system channel),
+  // which leaks short trailing replies like "Skickat." into the wrong channel.
+  // For these tasks the agent is responsible for its own delivery via the
+  // channel-specific MCP tool; we don't auto-forward the SDK result text.
+  const isAggregateJid = task.chat_jid.startsWith('dc:guild:');
+
   const scheduleClose = () => {
     if (closeTimer) return; // already scheduled
     closeTimer = setTimeout(() => {
@@ -187,8 +194,10 @@ async function runTask(
       async (streamedOutput: ContainerOutput) => {
         if (streamedOutput.result) {
           result = streamedOutput.result;
-          // Forward result to user (sendMessage handles formatting)
-          await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          if (!isAggregateJid) {
+            // Forward result to user (sendMessage handles formatting)
+            await deps.sendMessage(task.chat_jid, streamedOutput.result);
+          }
           scheduleClose();
         }
         if (streamedOutput.status === 'success') {
