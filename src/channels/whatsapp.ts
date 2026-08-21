@@ -314,7 +314,10 @@ export class WhatsAppChannel implements Channel {
         // WhatsApp group mentions use the LID in raw text (e.g. "@80355281346633")
         // instead of the display name. Normalize to @AssistantName for trigger matching.
         if (this.botLidUser && content.includes(`@${this.botLidUser}`)) {
-          content = content.replace(`@${this.botLidUser}`, `@${ASSISTANT_NAME}`);
+          content = content.replace(
+            `@${this.botLidUser}`,
+            `@${ASSISTANT_NAME}`,
+          );
         }
 
         const fromMe = msg.key.fromMe || false;
@@ -439,7 +442,14 @@ export class WhatsAppChannel implements Channel {
   }
 
   ownsJid(jid: string): boolean {
-    return jid.endsWith('@g.us') || jid.endsWith('@s.whatsapp.net');
+    // @lid = WhatsApp's privacy "Linked ID" addressing. Some 1:1 chats arrive
+    // only as @lid when no phone-JID translation is available; they must still
+    // be routed to (and replied to via) this channel.
+    return (
+      jid.endsWith('@g.us') ||
+      jid.endsWith('@s.whatsapp.net') ||
+      jid.endsWith('@lid')
+    );
   }
 
   async disconnect(): Promise<void> {

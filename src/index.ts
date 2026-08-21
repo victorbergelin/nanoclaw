@@ -190,7 +190,10 @@ function maybeAutoRegisterSummon(chatJid: string, msg: NewMessage): void {
     isMain: false,
     summonOnly: true,
   });
-  logger.info({ chatJid, folder, name }, 'Auto-registered WhatsApp summon chat');
+  logger.info(
+    { chatJid, folder, name },
+    'Auto-registered WhatsApp summon chat',
+  );
 }
 
 /**

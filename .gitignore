@@ -35,4 +35,7 @@ groups/global/*
 # Skills system (local per-installation state)
 .nanoclaw/
 
+# Runtime locks
+.claude/*.lock
+
 agents-sdk-docs
